@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 class SourceBean {
   const SourceBean({
     required this.key,
@@ -109,7 +111,7 @@ class SourceBean {
       changeable: _int(json['changeable'], 1),
       filterable: _int(json['filterable'], 1),
       playUrl: (json['playUrl'] ?? '').toString(),
-      ext: json['ext']?.toString() ?? '',
+      ext: _extOf(json['ext']),
       jar: (json['jar'] ?? '').toString(),
       playerType: _int(json['playerType'], -1),
       categories: (json['categories'] as List?)
@@ -152,7 +154,7 @@ class ParseBean {
   factory ParseBean.fromJson(Map<String, dynamic> json) => ParseBean(
     name: (json['name'] ?? '').toString(),
     url: (json['url'] ?? '').toString(),
-    ext: json['ext']?.toString() ?? '',
+    ext: _extOf(json['ext']),
     type: int.tryParse(json['type']?.toString() ?? '') ?? 0,
   );
 }
@@ -262,7 +264,7 @@ class LiveBean {
     type: (json['type'] ?? '0').toString(),
     url: (json['url'] ?? '').toString(),
     jar: (json['jar'] ?? '').toString(),
-    ext: json['ext']?.toString() ?? '',
+    ext: _extOf(json['ext']),
     epg: (json['epg'] ?? '').toString(),
     playerType: (json['playerType'] ?? '').toString(),
     timeZone: (json['timeZone'] ?? '').toString(),
@@ -521,4 +523,28 @@ class ConfigProfile {
         (j['addedSiteKeys'] as List?)?.map((e) => e.toString()).toList() ??
         const [],
   );
+}
+
+/// 订阅里的 `ext` 可能是字符串，也可能是 JSON 对象 / 数组。
+///
+/// `?.toString()` 对 Map 得到的是 Dart 的 `Map.toString()`：
+///   `{site: http://666.666291.xyz/, token: }`
+/// 这不是合法 JSON。加固壳（如 `csp_MoggCAT` 的 `Mogg.init`）会
+/// `JsonParser.parseString(ext)` → 解析失败 → 空 JsonObject →
+/// `getAsJsonPrimitive("site")` 返回 null → `.getAsString()` NPE，
+/// 表现为「配置能导入、所有站点 homeContent 全失败」。
+///
+/// 所以对象 / 数组一律用 `jsonEncode` 还原成合法 JSON；字符串原样返回，
+/// 保证既有那批「ext 就是一段字符串」的源行为完全不变。
+String _extOf(Object? raw) {
+  if (raw == null) return '';
+  if (raw is String) return raw;
+  if (raw is Map || raw is List) {
+    try {
+      return jsonEncode(raw);
+    } catch (_) {
+      return raw.toString();
+    }
+  }
+  return raw.toString();
 }
