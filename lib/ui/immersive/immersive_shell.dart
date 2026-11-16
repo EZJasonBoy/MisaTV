@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../app.dart';
 import '../../core/platform/window_service.dart';
@@ -28,6 +29,23 @@ class _ImmersiveShellState extends State<ImmersiveShell> {
       GlobalKey<SettingsPageState>();
   Timer? _clock;
   String _time = '';
+  DateTime? _lastRootBackAt;
+
+  /// 顶部导航自动隐藏：鼠标/按键出现，静止 4 秒后淡出。
+  Timer? _chromeTimer;
+  bool _chromeVisible = true;
+  bool _pointerOverChrome = false;
+  DateTime _lastActivity = DateTime.now();
+  static const _chromeIdle = Duration(seconds: 4);
+  final FocusNode _chromeFocus = FocusNode(debugLabel: 'immersive-chrome');
+
+  /// 已经访问过的 Tab：没打开过的页面不构建，
+  /// 避免启动时同时拉首页、直播频道 + EPG、设置页整棵树。
+  final Set<int> _builtTabs = {0};
+  late final List<FocusNode> _tabNodes = List<FocusNode>.generate(
+    _items.length,
+    (i) => FocusNode(debugLabel: 'immersive-tab-$i'),
+  );
 
   static const _items = <({IconData icon, String label})>[
     (icon: Icons.home_rounded, label: '首页'),
@@ -42,19 +60,67 @@ class _ImmersiveShellState extends State<ImmersiveShell> {
   void initState() {
     super.initState();
     RuntimeInstallPrompt.instance.onReveal = _revealRuntimeInstall;
+    immersiveBackRequests.addListener(_onBackRequest);
     // 沉浸观影 = 独占全屏；退出该模式时还原原来的窗口大小与位置。
     unawaited(enterImmersiveFullscreen());
+    // 沉浸模式的初始焦点放在当前 Tab 上：可见、可立刻用方向键进入内容。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _tabNodes[0].requestFocus();
+    });
+    _showChrome();
+    HardwareKeyboard.instance.addHandler(_onAnyKey);
     _tick();
     _clock = Timer.periodic(const Duration(seconds: 1), (_) => _tick());
   }
 
   @override
   void dispose() {
+    immersiveBackRequests.removeListener(_onBackRequest);
+    HardwareKeyboard.instance.removeHandler(_onAnyKey);
+    _chromeTimer?.cancel();
+    _chromeFocus.dispose();
+    for (final node in _tabNodes) {
+      node.dispose();
+    }
     RuntimeInstallPrompt.instance.onReveal = null;
     RuntimeInstallPrompt.instance.hostContext = null;
     _clock?.cancel();
     unawaited(exitImmersiveFullscreen());
     super.dispose();
+  }
+
+  /// 返回键在根页面：有二级页面时已经由全局 Navigator pop，
+  /// 这里负责从其它 Tab 退回首页；在首页再按一次退出沉浸模式。
+  void _onBackRequest() {
+    if (!mounted) return;
+    if (_index != 0) {
+      _lastRootBackAt = null;
+      setState(() => _index = 0);
+      _tabNodes[0].requestFocus();
+      _showChrome();
+      return;
+    }
+    final now = DateTime.now();
+    final last = _lastRootBackAt;
+    if (last != null && now.difference(last) < const Duration(seconds: 2)) {
+      _lastRootBackAt = null;
+      final app = AppScope.of(context);
+      unawaited(
+        app.setPlayerSettings(
+          app.playerSettings.copyWith(immersiveMode: false),
+        ),
+      );
+      return;
+    }
+    _lastRootBackAt = now;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        const SnackBar(
+          content: Text('再按一次返回键退出沉浸观影'),
+          duration: Duration(seconds: 2),
+        ),
+      );
   }
 
   void _tick() {
@@ -65,10 +131,49 @@ class _ImmersiveShellState extends State<ImmersiveShell> {
     if (text != _time && mounted) setState(() => _time = text);
   }
 
+  /// 任意输入（按键 / 鼠标移动）都算活动：顶栏出现并重新开始倒计时。
+  void _showChrome() {
+    if (!mounted) return;
+    _lastActivity = DateTime.now();
+    if (!_chromeVisible) setState(() => _chromeVisible = true);
+    _chromeTimer ??= Timer(_chromeIdle, _hideChrome);
+  }
+
+  bool _onAnyKey(KeyEvent event) {
+    // 播放器 / 详情页压在上面时不打扰底层页面。
+    if (event is KeyDownEvent &&
+        mounted &&
+        (ModalRoute.of(context)?.isCurrent ?? true)) {
+      _showChrome();
+    }
+    return false;
+  }
+
+  void _hideChrome() {
+    _chromeTimer = null;
+    if (!mounted || !_chromeVisible) return;
+    // 鼠标停在顶栏上、或焦点还在顶栏里时不要收起来，避免刚要点就消失。
+    if (_pointerOverChrome || _chromeFocus.hasFocus) {
+      _showChrome();
+      return;
+    }
+    // 刚有输入就还没到空闲时间：补上剩余时间，而不是立刻收起。
+    final idle = DateTime.now().difference(_lastActivity);
+    if (idle < _chromeIdle) {
+      _chromeTimer = Timer(_chromeIdle - idle, _hideChrome);
+      return;
+    }
+    setState(() => _chromeVisible = false);
+  }
+
   Future<void> _revealRuntimeInstall(RuntimeExtension kind) async {
     if (!mounted) return;
     Navigator.of(context).popUntil((route) => route.isFirst);
-    setState(() => _index = 5);
+    setState(() {
+      _builtTabs.add(5);
+      _index = 5;
+    });
+    _tabNodes[5].requestFocus();
     await WidgetsBinding.instance.endOfFrame;
     if (!mounted) return;
     await _settingsKey.currentState?.revealRuntime(kind);
@@ -76,8 +181,28 @@ class _ImmersiveShellState extends State<ImmersiveShell> {
 
   void _select(int index) {
     if (index == _index) return;
-    setState(() => _index = index);
+    setState(() {
+      _builtTabs.add(index);
+      _index = index;
+    });
+    _tabNodes[index].requestFocus();
+    _showChrome();
     if (index == 4) unawaited(AppScope.of(context).checkFavoriteUpdates());
+  }
+
+  Widget _pageAt(int index) {
+    if (!_builtTabs.contains(index)) return const SizedBox.shrink();
+    return switch (index) {
+      0 => const ImmersiveHomePage(),
+      1 => const ImmersiveSearchPage(),
+      2 => const ImmersiveLivePage(),
+      3 => const ImmersiveHistoryPage(),
+      4 => const ImmersiveFavoritesPage(),
+      _ => Padding(
+        padding: const EdgeInsets.only(top: 72),
+        child: SettingsPage(key: _settingsKey),
+      ),
+    };
   }
 
   @override
@@ -94,40 +219,92 @@ class _ImmersiveShellState extends State<ImmersiveShell> {
     final pages = IndexedStack(
       index: _index,
       children: [
-        const ImmersiveHomePage(),
-        const ImmersiveSearchPage(),
-        const ImmersiveLivePage(),
-        const ImmersiveHistoryPage(),
-        const ImmersiveFavoritesPage(),
-        Padding(
-          padding: const EdgeInsets.only(top: 72),
-          child: SettingsPage(key: _settingsKey),
-        ),
+        for (var i = 0; i < _items.length; i++)
+          // 非当前 Tab 的页面仍然在 IndexedStack 里保活，
+          // 必须排除焦点，否则方向键会走进看不见的页面。
+          ExcludeFocus(excluding: _index != i, child: _pageAt(i)),
       ],
     );
 
-    return Theme(
-      data: immersiveTheme(context),
-      child: Scaffold(
-        backgroundColor: Colors.black,
-        body: Stack(
-          children: [
-            Positioned.fill(child: pages),
-            Positioned(
-              left: 0,
-              right: 0,
-              top: 0,
-              child: _TopBar(
-                items: _items,
-                index: _index,
-                time: _time,
-                onSelect: _select,
-                onExit: () => app.setPlayerSettings(
-                  app.playerSettings.copyWith(immersiveMode: false),
-                ),
+    return MediaQuery(
+      // 大屏字号：只放大沉浸模式的文字，播放器与标准界面不受影响。
+      data: MediaQuery.of(context).copyWith(
+        textScaler: TextScaler.linear(app.playerSettings.immersiveFontScale),
+      ),
+      child: Theme(
+        data: immersiveTheme(context),
+        child: PopScope(
+          // 沉浸模式是根页面：系统返回（Android TV / 遥控器）先回首页 Tab，
+          // 不直接退出应用；窗口关闭仍走正常的窗口按钮。
+          canPop: false,
+          onPopInvokedWithResult: (didPop, _) {
+            if (didPop) return;
+            _onBackRequest();
+          },
+          child: Scaffold(
+            backgroundColor: Colors.black,
+            body: Listener(
+              // 鼠标一动就唤出顶栏；KeyboardListener 由 _onAnyKey 负责按键。
+              onPointerDown: (_) => _showChrome(),
+              onPointerMove: (_) => _showChrome(),
+              onPointerHover: (_) => _showChrome(),
+              child: Stack(
+                children: [
+                  Positioned.fill(child: pages),
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    top: 0,
+                    child: IgnorePointer(
+                      ignoring: !_chromeVisible,
+                      child: AnimatedSlide(
+                        offset: _chromeVisible
+                            ? Offset.zero
+                            : const Offset(0, -1),
+                        duration: const Duration(milliseconds: 220),
+                        curve: Curves.easeOutCubic,
+                        child: AnimatedOpacity(
+                          opacity: _chromeVisible ? 1 : 0,
+                          duration: const Duration(milliseconds: 180),
+                          child: Focus(
+                            // 顶栏或任意 Tab 获得焦点时重新显示，避免焦点落在
+                            // 已经滑出屏幕的按钮上。
+                            focusNode: _chromeFocus,
+                            skipTraversal: true,
+                            onFocusChange: (focused) {
+                              if (focused) _showChrome();
+                            },
+                            child: MouseRegion(
+                              onEnter: (_) {
+                                _pointerOverChrome = true;
+                                _showChrome();
+                              },
+                              onExit: (_) {
+                                _pointerOverChrome = false;
+                                _showChrome();
+                              },
+                              child: _TopBar(
+                                items: _items,
+                                index: _index,
+                                time: _time,
+                                tabNodes: _tabNodes,
+                                onSelect: _select,
+                                onExit: () => app.setPlayerSettings(
+                                  app.playerSettings.copyWith(
+                                    immersiveMode: false,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
-          ],
+          ),
         ),
       ),
     );
@@ -139,6 +316,7 @@ class _TopBar extends StatelessWidget {
     required this.items,
     required this.index,
     required this.time,
+    required this.tabNodes,
     required this.onSelect,
     required this.onExit,
   });
@@ -146,6 +324,7 @@ class _TopBar extends StatelessWidget {
   final List<({IconData icon, String label})> items;
   final int index;
   final String time;
+  final List<FocusNode> tabNodes;
   final ValueChanged<int> onSelect;
   final VoidCallback onExit;
 
@@ -196,6 +375,7 @@ class _TopBar extends StatelessWidget {
               _NavTab(
                 item: items[i],
                 selected: i == index,
+                focusNode: tabNodes[i],
                 onTap: () => onSelect(i),
               ),
             const Spacer(),
@@ -227,52 +407,44 @@ class _TopBar extends StatelessWidget {
   }
 }
 
-class _NavTab extends StatefulWidget {
+class _NavTab extends StatelessWidget {
   const _NavTab({
     required this.item,
     required this.selected,
     required this.onTap,
+    this.focusNode,
   });
 
   final ({IconData icon, String label}) item;
   final bool selected;
   final VoidCallback onTap;
-
-  @override
-  State<_NavTab> createState() => _NavTabState();
-}
-
-class _NavTabState extends State<_NavTab> {
-  bool _hover = false;
+  final FocusNode? focusNode;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final selected = widget.selected;
-    final color = selected
-        ? theme.colorScheme.primary
-        : Colors.white.withValues(alpha: _hover ? 0.88 : 0.50);
-    return MouseRegion(
-      cursor: SystemMouseCursors.click,
-      onEnter: (_) => setState(() => _hover = true),
-      onExit: (_) => setState(() => _hover = false),
-      child: GestureDetector(
-        onTap: widget.onTap,
-        child: Container(
+    return ImmersiveFocusable(
+      focusNode: focusNode,
+      onTap: onTap,
+      builder: (context, active) {
+        final color = selected
+            ? theme.colorScheme.primary
+            : Colors.white.withValues(alpha: active ? 0.88 : 0.50);
+        return Container(
           margin: const EdgeInsets.only(right: 4),
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
           decoration: BoxDecoration(
             color: selected
                 ? theme.colorScheme.primary.withValues(alpha: 0.12)
-                : (_hover ? Colors.white.withValues(alpha: 0.06) : null),
+                : (active ? Colors.white.withValues(alpha: 0.06) : null),
             borderRadius: BorderRadius.circular(8),
           ),
           child: Row(
             children: [
-              Icon(widget.item.icon, size: 17, color: color),
+              Icon(item.icon, size: 17, color: color),
               const SizedBox(width: 7),
               Text(
-                widget.item.label,
+                item.label,
                 style: theme.textTheme.titleSmall?.copyWith(
                   color: color,
                   fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
@@ -280,8 +452,8 @@ class _NavTabState extends State<_NavTab> {
               ),
             ],
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 }
