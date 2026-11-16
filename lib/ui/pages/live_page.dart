@@ -81,6 +81,7 @@ class _LivePageState extends State<LivePage> {
       final groups = await app.liveService.load(
         bean,
         sites: app.config?.sites ?? const [],
+        headerRules: app.liveHeaderRules,
       );
       if (!mounted) return;
       setState(() {

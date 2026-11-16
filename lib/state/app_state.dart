@@ -271,6 +271,7 @@ class AppState extends ChangeNotifier {
       doh: base.doh,
       ads: base.ads,
       proxy: base.proxy,
+      headers: base.headers,
     );
     _kazumiMerged = merged;
     _kazumiMergedBase = base;
@@ -417,6 +418,22 @@ class AppState extends ChangeNotifier {
 
   List<SourceBean> get usableSites =>
       config?.sites.where(isSiteUsable).toList() ?? const [];
+
+  /// 直播播放要用的 host → 请求头规则。
+  ///
+  /// 直播订阅和点播订阅可能是两份档案：先取直播订阅自己的，再补充点播
+  /// 订阅里的规则（同一 host 以直播订阅为准）。
+  List<HeaderRule> get liveHeaderRules {
+    final out = <HeaderRule>[];
+    final seen = <String>{};
+    for (final rule in <HeaderRule>[
+      ...?liveConfig?.headers,
+      ...?config?.headers,
+    ]) {
+      if (seen.add(rule.host.toLowerCase())) out.add(rule);
+    }
+    return out;
+  }
   List<LiveBean> get lives {
     final subscription = liveConfig?.lives ?? const <LiveBean>[];
     if (localLives.isEmpty) return subscription;
@@ -566,7 +583,11 @@ class AppState extends ChangeNotifier {
 
     mutate(rawLives);
     final rawJson = const JsonEncoder.withIndent('  ').convert(root);
-    final parsed = ConfigParser.parse(rawJson, jarReady: jarReady);
+    final parsed = ConfigParser.parse(
+      rawJson,
+      baseUrl: profile.resolveBaseUrl,
+      jarReady: jarReady,
+    );
     profiles = [
       for (final p in profiles)
         if (p.id == profile.id)
@@ -574,6 +595,7 @@ class AppState extends ChangeNotifier {
             id: p.id,
             name: p.name,
             url: p.url,
+            baseUrl: profile.baseUrl,
             rawJson: rawJson,
             importedAt: p.importedAt,
             report: parsed.report,
@@ -758,12 +780,17 @@ class AppState extends ChangeNotifier {
         continue;
       }
       try {
-        final parsed = ConfigParser.parse(p.rawJson, jarReady: jarReady);
+        final parsed = ConfigParser.parse(
+          p.rawJson,
+          baseUrl: p.resolveBaseUrl,
+          jarReady: jarReady,
+        );
         updated.add(
           ConfigProfile(
             id: p.id,
             name: p.name,
             url: p.url,
+            baseUrl: p.baseUrl,
             rawJson: p.rawJson,
             importedAt: p.importedAt,
             report: parsed.report,
@@ -795,7 +822,11 @@ class AppState extends ChangeNotifier {
     for (final p in profiles) {
       if (p.rawJson.trim().isEmpty) continue;
       try {
-        final parsed = ConfigParser.parse(p.rawJson, jarReady: jarReady);
+        final parsed = ConfigParser.parse(
+          p.rawJson,
+          baseUrl: p.resolveBaseUrl,
+          jarReady: jarReady,
+        );
         keep.addAll(sourceService.jar.jarKeysOf(parsed.config));
       } catch (_) {
         return;
@@ -968,7 +999,11 @@ class AppState extends ChangeNotifier {
       return;
     }
     try {
-      final parsed = ConfigParser.parse(profile.rawJson, jarReady: jarReady);
+      final parsed = ConfigParser.parse(
+        profile.rawJson,
+        baseUrl: profile.resolveBaseUrl,
+        jarReady: jarReady,
+      );
       final effective = _withoutDeletedSites(
         parsed.config,
         profile.deletedSiteKeys,
@@ -1053,6 +1088,7 @@ class AppState extends ChangeNotifier {
       doh: config.doh,
       ads: config.ads,
       proxy: config.proxy,
+      headers: config.headers,
     );
   }
 
@@ -1064,6 +1100,7 @@ class AppState extends ChangeNotifier {
       try {
         liveConfig = ConfigParser.parse(
           profile.rawJson,
+          baseUrl: profile.resolveBaseUrl,
           jarReady: jarReady,
         ).config;
       } catch (_) {
@@ -1217,7 +1254,7 @@ class AppState extends ChangeNotifier {
         ? const SiteConfig()
         : ConfigParser.parse(
             current.rawJson,
-            baseUrl: current.url,
+            baseUrl: current.resolveBaseUrl,
             jarReady: jarReady,
           ).config;
     final newSites = {for (final site in parsed.config.sites) site.key: site};
@@ -1502,6 +1539,7 @@ class AppState extends ChangeNotifier {
         return await _importText(
           liveJson,
           url: url,
+          baseUrl: res.url,
           name: profile.name,
           replaceProfileId: id,
           activate: activate,
@@ -1514,6 +1552,7 @@ class AppState extends ChangeNotifier {
       final outcome = await _importText(
         body,
         url: url,
+        baseUrl: res.url,
         name: profile.name,
         replaceProfileId: id,
         activate: activate,
@@ -1634,6 +1673,7 @@ class AppState extends ChangeNotifier {
     return _importText(
       snapshot.rawJson,
       url: profile.url,
+      baseUrl: profile.resolveBaseUrl,
       name: profile.name,
       replaceProfileId: profile.id,
     );
@@ -1765,6 +1805,7 @@ class AppState extends ChangeNotifier {
       id: existing?.id ?? 'p${now.millisecondsSinceEpoch}',
       name: profileName,
       url: url,
+      baseUrl: (baseUrl ?? url).trim(),
       rawJson: rawJson,
       importedAt: existing?.importedAt ?? now,
       report: parsed.report,
@@ -2001,6 +2042,7 @@ class AppState extends ChangeNotifier {
                   id: p.id,
                   name: name.trim().isEmpty ? p.name : name.trim(),
                   url: p.url,
+                  baseUrl: p.baseUrl,
                   rawJson: p.rawJson,
                   importedAt: p.importedAt,
                   report: p.report,
@@ -2141,7 +2183,11 @@ class AppState extends ChangeNotifier {
     root['sites'] = sites;
 
     final rawJson = const JsonEncoder.withIndent('  ').convert(root);
-    final parsed = ConfigParser.parse(rawJson, jarReady: jarReady);
+    final parsed = ConfigParser.parse(
+      rawJson,
+      baseUrl: profile.resolveBaseUrl,
+      jarReady: jarReady,
+    );
     final tombstones = [
       for (final key in profile.deletedSiteKeys)
         if (!keys.contains(key)) key,
@@ -2155,6 +2201,7 @@ class AppState extends ChangeNotifier {
             id: p.id,
             name: p.name,
             url: p.url,
+            baseUrl: profile.baseUrl,
             rawJson: rawJson,
             importedAt: p.importedAt,
             report: parsed.report,
@@ -2262,7 +2309,11 @@ class AppState extends ChangeNotifier {
     root['sites'] = keep;
 
     final rawJson = const JsonEncoder.withIndent('  ').convert(root);
-    final parsed = ConfigParser.parse(rawJson, jarReady: jarReady);
+    final parsed = ConfigParser.parse(
+      rawJson,
+      baseUrl: profile.resolveBaseUrl,
+      jarReady: jarReady,
+    );
     final tombstones = <String>{
       ...profile.deletedSiteKeys,
       ...targets,
@@ -2278,6 +2329,7 @@ class AppState extends ChangeNotifier {
             id: p.id,
             name: p.name,
             url: p.url,
+            baseUrl: profile.baseUrl,
             rawJson: rawJson,
             importedAt: p.importedAt,
             report: parsed.report,
@@ -2308,7 +2360,11 @@ class AppState extends ChangeNotifier {
   ) async {
     final SiteConfig parsed;
     try {
-      parsed = ConfigParser.parse(profile.rawJson, jarReady: jarReady).config;
+      parsed = ConfigParser.parse(
+        profile.rawJson,
+        baseUrl: profile.resolveBaseUrl,
+        jarReady: jarReady,
+      ).config;
     } catch (_) {
       return 0;
     }
@@ -2330,6 +2386,7 @@ class AppState extends ChangeNotifier {
             id: p.id,
             name: p.name,
             url: p.url,
+            baseUrl: p.baseUrl,
             rawJson: p.rawJson,
             importedAt: p.importedAt,
             report: p.report,
@@ -2386,7 +2443,11 @@ class AppState extends ChangeNotifier {
 
     mutate(rawSites);
     final rawJson = const JsonEncoder.withIndent('  ').convert(root);
-    final parsed = ConfigParser.parse(rawJson, jarReady: jarReady);
+    final parsed = ConfigParser.parse(
+      rawJson,
+      baseUrl: profile.resolveBaseUrl,
+      jarReady: jarReady,
+    );
     final addedKeys = <String>{
       ...profile.addedSiteKeys,
       for (final key in markAdded)
@@ -2399,6 +2460,7 @@ class AppState extends ChangeNotifier {
             id: p.id,
             name: p.name,
             url: p.url,
+            baseUrl: profile.baseUrl,
             rawJson: rawJson,
             importedAt: p.importedAt,
             report: parsed.report,
@@ -2622,7 +2684,11 @@ class AppState extends ChangeNotifier {
       if (profile.rawJson.trim().isEmpty) continue;
       try {
         configs.add(
-          ConfigParser.parse(profile.rawJson, jarReady: jarReady).config,
+          ConfigParser.parse(
+            profile.rawJson,
+            baseUrl: profile.resolveBaseUrl,
+            jarReady: jarReady,
+          ).config,
         );
       } catch (_) {
         // 单份坏档案不影响其余档案导出

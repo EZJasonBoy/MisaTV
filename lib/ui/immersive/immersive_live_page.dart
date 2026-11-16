@@ -64,6 +64,7 @@ class _ImmersiveLivePageState extends State<ImmersiveLivePage> {
       final groups = await app.liveService.load(
         bean,
         sites: app.config?.sites ?? const [],
+        headerRules: app.liveHeaderRules,
       );
       if (!mounted) return;
       setState(() {

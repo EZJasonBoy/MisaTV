@@ -90,4 +90,33 @@ void main() {
       expect(site.ext, '{}');
     });
   });
+
+  group('ConfigProfile 相对路径基准', () {
+    test('保存实际订阅地址，序列化后用实际地址解析', () {
+      final profile = ConfigProfile(
+        id: 'p',
+        name: 'n',
+        url: 'https://clun.top/box.json',
+        baseUrl: 'https://mirror.example.com/sub/box.json',
+        rawJson: '{}',
+        importedAt: DateTime(2026),
+      );
+      final restored = ConfigProfile.fromJson(profile.toJson());
+      expect(restored.baseUrl, 'https://mirror.example.com/sub/box.json');
+      expect(
+        restored.resolveBaseUrl,
+        'https://mirror.example.com/sub/box.json',
+      );
+    });
+
+    test('旧档案没有 baseUrl 时回落到 url', () {
+      final legacy = ConfigProfile.fromJson(<String, dynamic>{
+        'id': 'p',
+        'url': 'https://clun.top/box.json',
+        'rawJson': '{}',
+      });
+      expect(legacy.baseUrl, isEmpty);
+      expect(legacy.resolveBaseUrl, 'https://clun.top/box.json');
+    });
+  });
 }
