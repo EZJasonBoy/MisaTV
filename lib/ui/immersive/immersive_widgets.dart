@@ -12,6 +12,7 @@ import '../pages/detail_page.dart';
 import '../widgets/mouse_drag_scroll.dart';
 import 'designed_title.dart';
 import 'hero_title_style.dart';
+import 'immersive_metrics.dart';
 import 'title_tint.dart';
 
 /// 沉浸观影统一的大屏主题：强制深色 + 透明 Scaffold 背景。
@@ -931,6 +932,7 @@ class _ImmersiveHeroState extends State<ImmersiveHero> {
   Widget build(BuildContext context) {
     final items = widget.items;
     if (items.isEmpty) return const SizedBox.shrink();
+    final m = ImmersiveMetrics.of(context);
     return MouseRegion(
       onEnter: (_) => _hover = true,
       onExit: (_) => _hover = false,
@@ -983,9 +985,9 @@ class _ImmersiveHeroState extends State<ImmersiveHero> {
                         ),
                       ),
                       Positioned(
-                        left: 64,
-                        right: 64,
-                        bottom: 64,
+                        left: m.heroInset,
+                        right: m.heroInset,
+                        bottom: m.heroBottom,
                         child: TitleTint(
                           title: item.title,
                           year: item.year,
@@ -1005,10 +1007,16 @@ class _ImmersiveHeroState extends State<ImmersiveHero> {
                                 countries: item.countries,
                                 fallback: item.subtitle,
                               );
+                              final heroTextMaxWidth = m.compact
+                                  ? MediaQuery.sizeOf(context).width -
+                                      m.heroInset * 2
+                                  : double.infinity;
                               final info = _HeroInfoColumn(
                                 item: item,
                                 compact: plan.vertical,
-                                descriptionWidth: plan.vertical ? 560 : 760,
+                                descriptionWidth: plan.vertical
+                                    ? (m.compact ? heroTextMaxWidth : 560)
+                                    : (m.compact ? heroTextMaxWidth : 760),
                               );
                               return Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -1021,7 +1029,7 @@ class _ImmersiveHeroState extends State<ImmersiveHero> {
                                       children: [
                                         DesignedTitle(
                                           plan: plan,
-                                          maxWidth: 1100,
+                                          maxWidth: heroTextMaxWidth,
                                           maxHeight: widget.height - 220,
                                           overline: tagline,
                                         ),
@@ -1032,7 +1040,7 @@ class _ImmersiveHeroState extends State<ImmersiveHero> {
                                   else ...[
                                     DesignedTitle(
                                       plan: plan,
-                                      maxWidth: 1100,
+                                      maxWidth: heroTextMaxWidth,
                                       maxHeight: widget.height - 220,
                                       overline: tagline,
                                     ),
@@ -1051,8 +1059,8 @@ class _ImmersiveHeroState extends State<ImmersiveHero> {
             ),
             if (items.length > 1)
               Positioned(
-                right: 56,
-                bottom: 58,
+                right: m.compact ? 14 : 56,
+                bottom: m.compact ? 12 : 58,
                 child: Row(
                   children: [
                     for (var i = 0; i < items.length; i++)

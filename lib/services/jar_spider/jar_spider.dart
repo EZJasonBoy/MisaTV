@@ -31,6 +31,7 @@ import 'bili_dash_fallback.dart';
 import 'hyms_native.dart';
 import 'spider_env.dart';
 import 'spider_host.dart';
+export 'jar_spider_android.dart';
 
 /// 下载到的内容 md5 与订阅声明不一致（通常是 CDN 回了错误页），可重连重试。
 class _JarChecksumException implements Exception {
