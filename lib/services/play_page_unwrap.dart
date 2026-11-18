@@ -38,23 +38,14 @@ class PlayPageUnwrap {
 
   /// 网盘 CDN 直链的路径通常没有扩展名（靠 query 里的 token 鉴权），
   /// 不能按「无扩展名 = 播放页」去抓取：整集文件会被 getText 拉下来并超时。
-  static const _directDownloadHosts = <String>[
-    'drive.quark.cn',
-    'drive.uc.cn',
-    'baidupcs.com',
-    'pcs.baidu.com',
-    'aliyundrive.com',
-    'alipan.com',
-  ];
 
-  static bool _isDirectDownloadHost(String host) {
-    for (final domain in _directDownloadHosts) {
-      if (host == domain || host.endsWith('.$domain')) return true;
-    }
-    return false;
-  }
 
   /// 只有疑似播放页/分享页才需要抓取；带媒体扩展名的直链直接放行。
+  ///
+  /// ★ 网盘 CDN 直链必须放行：它们的路径是「一长串 hex 段 + 文件名哈希」，
+  ///   没有扩展名，会被下面「无扩展名 → 当成播放页」的兜底误判。
+  ///   误判的代价是**每次播放/换集都白抓一次**（10 秒超时），实测日志里
+  ///   15 次「云播页面解析失败」间隔精确等于 10.0 秒。
   static bool needsUnwrap(String raw) {
     final uri = Uri.tryParse(raw.trim());
     if (uri == null || !(uri.scheme == 'http' || uri.scheme == 'https')) {
@@ -64,7 +55,9 @@ class PlayPageUnwrap {
     if (host == '127.0.0.1' || host == 'localhost' || host == '::1') {
       return false;
     }
-    if (_isDirectDownloadHost(host)) return false;
+    // 网盘 CDN 直链直接放行（名单见 _driveCdnSuffixes，覆盖上游原
+    // _directDownloadHosts 的全部条目并多 5 个）。
+    if (_isDriveCdnHost(host)) return false;
     final path = uri.path.toLowerCase();
     const media = [
       '.m3u8',
@@ -89,6 +82,47 @@ class PlayPageUnwrap {
     // 无扩展名的路径（不含 .php 这类接口）也当作可能的播放页。
     return !path.contains('.');
   }
+
+  /// 网盘 CDN 取流主机：直链本身就是媒体流，抓成 HTML 解析毫无意义。
+  ///
+  /// 判定用「域名后缀 + 主机名前缀」，不列全量主机 —— 夸克/百度/UC 的
+  /// CDN 节点是按地域动态下发的（`dl-pc-zb` / `dl-pc-zb-j` / `dl-pc-sz` /
+  /// `dl-pc-bj` …），写死具体节点迟早漏。
+  static bool _isDriveCdnHost(String host) {
+    for (final suffix in _driveCdnSuffixes) {
+      // 裸域（`drive.uc.cn`）与子域（`dl-pc-sz.drive.uc.cn`）都要命中：
+      // 只写 endsWith('.$suffix') 会漏掉裸域，实测 drive.uc.cn 因此被判成
+      // 「需要抓取的播放页」，每次播放白等一次 10 秒超时。
+      if (host == suffix || host.endsWith('.$suffix')) return true;
+    }
+    return false;
+  }
+
+  /// 这个播放地址是不是网盘 CDN（夸克 / UC / 百度 …）的直链。
+  ///
+  /// 供播放页判断「初始化超时后该不该改用壳内 `/chunk` 重取」：这类直链经
+  /// libmdk 打开大 mkv 时会纯顺读、拿不到尾部 Cues，而同一份数据经壳的
+  /// `/chunk` 能秒开（实测记录见 `JarSpiderService.replayViaServe`）。
+  static bool isDriveCdnUrl(String url) {
+    final host = Uri.tryParse(url.trim())?.host.toLowerCase() ?? '';
+    if (host.isEmpty) return false;
+    return _isDriveCdnHost(host);
+  }
+
+  /// 网盘取流域名后缀（含前导点，按后缀匹配）。
+  static const _driveCdnSuffixes = <String>[
+    'drive.quark.cn', // 夸克 / UC 下载节点：dl-pc-*.drive.quark.cn
+    'drive.uc.cn', // UC 下载节点（裸域 drive.uc.cn 与子域都存在）
+    'pcs.baidu.com', // 百度 PCS：d.pcs.baidu.com / c.pcs.baidu.com
+    'baidupcs.com', // 百度 PCS 备用域
+    'aliyundrive.com', // 阿里云盘
+    'alipan.com', // 阿里云盘（新域）
+    '123pan.com', // 123 云盘
+    '189.cn', // 天翼云盘
+    '115.com', // 115 网盘
+    'xunlei.com', // 迅雷
+    'ctyunxs.cn', // 天翼云盘取流
+  ];
 
   /// 从页面源码里提取 m3u8 / mp4 直链，优先 `main` / `vid` 这类主清单变量。
   static String? extractMediaUrl(String html, String pageUrl) {

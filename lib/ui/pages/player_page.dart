@@ -42,6 +42,8 @@ import '../../services/player/external_players.dart';
 import '../../services/player/skip_segments.dart';
 import '../../services/player/sleep_timer.dart';
 import '../../services/relay/local_relay.dart';
+import '../../services/relay/play_seek_probe.dart';
+import '../../services/relay/play_speed_meter.dart';
 import '../../services/party/party_room.dart';
 import '../../services/party/watch_party.dart';
 import '../../services/jar_spider/hyms_native.dart';
@@ -230,6 +232,21 @@ class _PlayerPageState extends State<PlayerPage>
   /// 该集是否已经因初始化超时尝试过绕过本机中继直连，防止反复超时。
   int _directRetriedEpisode = -1;
 
+  /// 该集是否已经因「网盘直链读不出索引」改用壳内 serve host 重取过。
+  ///
+  /// 夸克/UC/百度的直链交给 libmdk 打开大 mkv 时会纯顺序读、拿不到尾部
+  /// Cues（实测 25 秒只读到 142MB / 6422MB 后超时）；而同一份数据经壳的
+  /// `/chunk` 是秒开。这条重试只在直链超时后走一次，避免死循环。
+  int _serveRetriedEpisode = -1;
+
+  /// 已经确认「网盘直链读不出尾部索引」的线路（`站点|线路`）。
+  ///
+  /// 夸克/UC 的部分大 mkv 交给 libmdk 时会纯顺序读、永远摸不到文件尾的
+  /// Cues（实测 18:11:53 玩偶「嫁金钗」6.0GB E08：25 秒走到 209MB / 6422MB）。
+  /// 这类线路一旦被证实，同一线路的下一集就**直接**走壳内取流，不再让用户
+  /// 每集都白等一次 25 秒超时。换线路 / 换站点不受影响（key 含站点与线路名）。
+  final Set<String> _driveServePreferred = {};
+
   /// 本次打开是否已记录过播放内核错误（原生内核闪退前通常只有这一条线索）。
   bool _errorLogged = false;
 
@@ -258,6 +275,24 @@ class _PlayerPageState extends State<PlayerPage>
 
   /// 自动换线正在异步释放旧 controller；手动切换前也要等它完成。
   Future<void>? _controllerDisposePending;
+
+  /// 刚被看门狗判死的那个 controller —— 换路重开时**不必等它释放**。
+  ///
+  /// ★ 为什么要记这个（2026-11-17 20:01:24 实测，玩偶「嫁金钗」[6.0GB]E08）：
+  ///
+  ///   看门狗 5.3 秒判定「只顺读、读不到尾部索引」后走换路分支，换路取链
+  ///   只花 2.6 秒（20:01:30.3 → 20:01:32.9），但下一集真正开始打开要到
+  ///   **20:01:40.9** —— 中间白等 8.0 秒，正好是
+  ///   `await old.dispose().timeout(const Duration(seconds: 8))` 的满额超时。
+  ///
+  ///   而那个 dispose 必然超时：`VideoPlayerController.dispose()` 第一件事是
+  ///   `await _creatingCompleter!.future`，等的是原生 `prepare()` 返回；
+  ///   而 prepare 正卡在「顺序扫 6.4GB 找 Cues」上，永远不返回。
+  ///
+  ///   既然我们已经**确知**这只内核卡死了，就不该再为它等 8 秒：直接放弃
+  ///   释放（线程池里的僵尸 libmdk 实例不影响新建），立刻打开新地址。
+  ///   这是 17.4 秒 → 9.4 秒的关键。
+  bool _deadControllerPending = false;
 
   /// 滚轮调音量的落盘防抖：连续滚动时只在停下后写一次播放设置。
   Timer? _volumeWheelTimer;
@@ -294,6 +329,7 @@ class _PlayerPageState extends State<PlayerPage>
   /// 播放器「详情」悬浮层开关与每秒刷新时钟 / 网速的计时器。
   bool _detailsVisible = false;
   Timer? _detailsTimer;
+
 
   /// 「详情」用的媒体信息缓存：只在 1 秒采样时读一次 fvp，避免播放器
   /// 每帧回调都把瞬时码率直接画到屏幕上（会剧烈跳动、出现关键帧尖峰）。
@@ -576,7 +612,12 @@ class _PlayerPageState extends State<PlayerPage>
       _autoSearchTimer?.cancel();
       _autoSearchTimer = null;
     }
-    if (index != _index) _directRetriedEpisode = -1;
+    if (index != _index) {
+      _directRetriedEpisode = -1;
+      _serveRetriedEpisode = -1;
+      // 换集了：上一条「判死待释放」的标记与这一集无关，清掉。
+      _deadControllerPending = false;
+    }
     // 同一集正在取链时重复点击直接忽略：否则会并发拉多个常驻取流进程、
     // 同时初始化多个 controller，最后真的会同时播放好几份。
     if (play == null && _loadingIndex == index) return false;
@@ -687,6 +728,60 @@ class _PlayerPageState extends State<PlayerPage>
       return false;
     }
     if (play == null) _loadingIndex = null;
+    // ★ 这条线路先前已被证实「网盘直链读不出尾部索引」，直接走壳内取流。
+    //
+    //   否则用户每换一集都要再白等一次 25 秒超时（实测 18:11:53 → 18:12:18
+    //   点 E08 白等 25 秒才失败；换到 1.3GB 的 E24 立刻能播 —— 小文件
+    //   libmdk 能一路顺读到尾，6GB 的 E08 就永远等不到）。
+    //   只对「同一站点 + 同一线路名」生效，换线路不受影响。
+    // ★ 这里**不要**加 `play == null`。
+    //
+    //   `preferServe` 的语义是「这条线路的直链读不动」，和「这一集有没有
+    //   预取到地址」无关。加了那个条件后，从详情页点播 / 页面内连点下一集
+    //   （`play != null`）都会绕过它，于是每集都要重新走一遍
+    //   「直链 → 等判死 → 换壳内」。
+    //
+    //   实测代价（2026-11-18 15:42，E11 那一集）：
+    //
+    //     15:42:04.323  K8m5IUFf  start=0
+    //     15:42:04.524  206 len=8388608          首段 8MB，0.2 秒
+    //     15:42:05.070  K8m5IUFf  start=8388608
+    //     15:42:26.940  K8m5IUFf  start=41943040    ← 22 秒后才要下一段
+    //
+    //     那一个 32MB 分片拉了 22 秒 = 1.5 MB/s。这 22 秒里僵尸请求全被
+    //     拒绝了（日志只有「拒绝僵尸请求」，零字节）—— 不是带宽被分走，
+    //     是这条直链本身就这么慢。
+    //
+    //   去掉条件后：第一集判死一次（约 6 秒），后续每集直接从壳内取流
+    //   （约 5 秒），不再每集白等 20 秒，也不再产生僵尸播放器。
+    final preferServe =
+        _driveServePreferred.contains('${_site.key}|$_flag') &&
+        _site.isJarSpider &&
+        !bypassRelay;
+    if (preferServe && PlayPageUnwrap.isDriveCdnUrl(target.url)) {
+      AppLog.i(
+        'player',
+        '该线路直链读不动，直接走壳内取流 index=$index url=${redactUrl(target.url)}',
+      );
+      final warm = await app.sourceService.replayViaServe(
+        site: _site,
+        config: app.config ?? const SiteConfig(),
+        flag: _flag,
+        rawUrl: _episodes[index].url,
+      );
+      if (seq != _openSeq || !mounted) return false;
+      if (warm != null && warm.playable) {
+        target = warm;
+      } else {
+        AppLog.w('player', '壳内取流未取到，本次仍用直链 index=$index');
+        _driveServePreferred.remove('${_site.key}|$_flag');
+      }
+    }
+    // 打开前的「64KB 头体检」曾经在这里：拉文件头看 SeekHead 有没有 Cues 指针，
+    // 没有就直接走壳内取流。2026-11-17 全天实测 41 次体检里 **判出 linearOnly
+    // 0 次** —— 能取到头的文件（26 次）SeekHead 里都写了 Cues，取不到头的
+    // （11 次 403）只能回 unknown。也就是说它一次都没能省下看门狗的时间，
+    // 反而每次白花 0.2~0.6 秒。已删除，统一由下面的顺读看门狗负责。
     final source = bypassRelay
         ? target
         : app.preparePlay(target, forceRelay: true);
@@ -717,24 +812,76 @@ class _PlayerPageState extends State<PlayerPage>
       _errorLogged = false;
       _mediaStats = null;
       _netSmoother.reset();
+      // 换集/换线路：中继的累计字节归零，否则上一集的流量会算进本集速度。
+      PlaySpeedMeter.instance.reset();
       _live = false;
     });
+    // 换集 / 换线路：立刻掐掉中继上一条播放的转发会话。
+    //
+    // 播放器换 URL 时不会通知中继，旧那一集的转发会继续从上游拉数据 ——
+    // 实测 2026-11-18 13:21：82.2GB 奥德赛开播后，前一部「复仇者联盟」
+    // （Ent9tGSS）的上游连接还在拉，一直拉到 13:21:58。结果是同一个 CDN
+    // 连接池被多个片分掉：单独跑 32MB 分片能到 12.27 MB/s，实际播放只有
+    // 4.47 MB/s，而这条片码率 5.90 MB/s —— 立刻卡。
+    LocalRelay.instance.releasePlaySessions();
+    // ★ 这一集如果之前被判死过，先解除标记 —— 用户主动点回来就该给它
+    //   一次机会。真读不动的话看门狗 2.5 秒会再判一次，代价可接受。
+    LocalRelay.instance.revivePlayTarget(target.url);
+    // ★ 同时清空探针窗口。这里正好是「确实换片了」的语义边界。
+    //
+    //   探针现在是滑动时间窗口，不清就会把上一集的样本带进新一集：
+    //   实测 2026-11-18 14:00:45 直链判死后换到 `/chunk`，chunk 自己只发了
+    //   1 条请求，但窗口里还积压着 9 条直链的样本 —— 250 毫秒后
+    //   `looksSequentialOnly()` 仍然成立，刚打开的 chunk 立刻被判死。
+    //
+    //   放在这里而不是 `_watchSequentialOnly()` 里，是因为后者每个实例都会
+    //   调一次，连点几集时会互相清空（那正是上一版的 bug）。
+    PlaySeekProbe.instance.reset();
     final old = _controller;
     _controller = null;
     old?.removeListener(_onPlayerValue);
     // 必须等旧 controller 释放完再建新的：fvp/libmdk 的销毁与初始化都在原生侧，
     // 换集/换线路时并发会让播放内核在驱动/解析线程上崩溃（整进程闪退，没有 Dart 栈）。
-    try {
-      await old?.dispose();
-    } catch (_) {
-      // 旧实例释放失败不影响新一集
+    //
+    // ★ 但要**限时**。`VideoPlayerController.dispose()` 里的第一件事是
+    //   `await _creatingCompleter!.future`（video_player.dart:707），而那个
+    //   completer 要等 `_videoPlayerPlatform.createWithOptions` 返回，也就是
+    //   fvp 的 `player.prepare()` 成功回来。上游卡住时 prepare 不返回，
+    //   dispose 就永远挂着 —— 用户侧看到的是「点了新的一集，画面一直黑」。
+    //   实测：玩偶「嫁金钗」夸克原画 5.7GB E13，12:44:22 开始打开 → 12:54:09
+    //   才报 timeout，中间 562 秒没有任何新动作，正是卡在这里。
+    //
+    // ★★ 但**已经判死的那个**不必等（见 _deadControllerPending 的说明）：
+    //   看门狗刚确认它卡在「顺序扫 Cues」上，dispose 必然满额超时。
+    //   实测 20:01:24 那次换路，取链只花 2.6 秒，却为 dispose 白等 8.0 秒
+    //   （20:01:32.9 → 20:01:40.9 才开始打开 chunk）。用户体感就是
+    //   「明明已经切过去了，还要再黑屏 8 秒」。
+    if (!_deadControllerPending) {
+      try {
+        await old?.dispose().timeout(const Duration(seconds: 8));
+      } catch (_) {
+        // 旧实例释放失败 / 超时都不影响新一集
+      }
+    } else {
+      // 判死的那只：后台放着释放，绝口不等它。
+      _deadControllerPending = false;
+      AppLog.i('player', '跳过已判死内核的释放等待（省 8s），直接打开新地址');
+      unawaited(
+        old?.dispose().timeout(const Duration(seconds: 60)).catchError((_) {}),
+      );
     }
     final pendingDispose = _controllerDisposePending;
     if (pendingDispose != null) {
       try {
-        await pendingDispose;
+        // ★ 必须限时：`VideoPlayerController.dispose()` 内部先
+        //   `await _creatingCompleter!.future`，而那个 completer 要等原生
+        //   `prepare()` 返回。上游被 CDN 压到 0.1MB/s 时它几分钟都不返回，
+        //   dispose 就会无限挂起（实测 12:44:22 → 12:54:09，562 秒）。
+        //   等不到就放弃等待，继续开下一集 —— 宁可多留一个僵尸内核，
+        //   也不能让整页黑屏。
+        await pendingDispose.timeout(const Duration(seconds: 5));
       } catch (_) {
-        // 自动换线释放失败也不阻断手动切换
+        // 自动换线释放失败 / 超时都不阻断手动切换
       }
     }
     if (seq != _openSeq || !mounted) return false;
@@ -752,7 +899,47 @@ class _PlayerPageState extends State<PlayerPage>
       controller.addListener(_onPlayerValue);
       // 4K / HDR 线路经过本机中继时，个别清单会让 fvp 一直没首帧；
       // 25 秒没有初始化完成就放弃，后面会尝试绕过中继直连。
-      await controller.initialize().timeout(const Duration(seconds: 25));
+      //
+      // ★ 但「等满 25 秒」对大文件网盘直链来说太浪费：实测 libmdk 打开
+      //   夸克 6.0GB mkv 时会从 0 开始纯顺序读，25 秒只走到 209MB，
+      //   期间**没有任何请求落在文件尾部**（Cues 索引在 6.42GB）。
+      //   这种模式注定打不开 —— 等 25 秒只是让用户多黑屏 20 秒。
+      //   所以并行挂一个看门狗：中继的 PlaySeekProbe 一旦确认「只顺读、
+      //   从不摸尾部、5 秒还不到 20%」，就提前放弃这一次，立刻换壳内取流。
+      final initSw = Stopwatch()..start();
+      final deathWatch = _watchSequentialOnly(source.url);
+      try {
+        await Future.any<void>([
+          controller.initialize().timeout(const Duration(seconds: 25)),
+          deathWatch.future,
+        ]);
+        if (deathWatch.fired()) {
+          // 看门狗先到：抛一个带标记的超时，让下面的失败分支走「换路重取」。
+          //
+          // ★ 同时打上「这只内核已判死」的标记：它正卡在原生 prepare 里
+          //   （顺序扫 Cues），dispose 一定等到超时。换路时不该为它再等 8 秒。
+          _deadControllerPending = true;
+          // ★★ 立刻掐掉这条已经判死的直链转发。
+          //
+          //   不掐的话，从判死到换路取链成功之间（实测 14:00:45.25 →
+          //   14:00:53.02，约 8 秒）旧连接还在从 CDN 拉 32MB 分片 ——
+          //   日志里 14:00:47 / 14:00:49 / 14:00:52 三条 `bytes=...` 就是它。
+          //   这 8 秒的带宽全是浪费，而且会和壳内取流抢同一个 CDN 名额。
+          AppLog.i('player', '判死的直链连接立刻释放');
+          LocalRelay.instance.releasePlaySessions();
+          throw TimeoutException(
+            '顺序读 ${PlaySeekProbe.instance}',
+            const Duration(seconds: 25),
+          );
+        }
+      } finally {
+        deathWatch.cancel();
+      }
+      AppLog.i(
+        'player',
+        '打开就绪 ${_episodeName.isEmpty ? '正片' : _episodeName} '
+            'initialize=${initSw.elapsedMilliseconds}ms',
+      );
       // 缓冲参数要在起播前设好：fvp 的 bufferRange 只影响后续拉流。
       _applyBufferRange(controller);
       final live = _detectLive(controller);
@@ -780,6 +967,7 @@ class _PlayerPageState extends State<PlayerPage>
       );
       _mediaRetriedEpisode = -1;
       _directRetriedEpisode = -1;
+      _serveRetriedEpisode = -1;
       setState(() {
         _resolving = false;
         _buffering = false;
@@ -809,31 +997,126 @@ class _PlayerPageState extends State<PlayerPage>
       if (_danmakuEnabled && !live) unawaited(_loadDanmaku());
       return true;
     } catch (e) {
-      if (seq != _openSeq || !mounted) return false;
+      // ★ 先记日志，再判断要不要继续。
+      //
+      //   原先是「seq 变了 / 页面已关 → 直接 return false」，连日志都不打。
+      //   结果：用户点一条卡死的线路，25 秒超时之后**日志里什么都没有**，
+      //   既看不到超时、也看不到「改用直连重试」—— 排查时只能靠猜。
+      //   实测 13:49:44 与 13:51:01 两次点 5.7GB E05 就是这样：只有
+      //   「开始打开」，之后 129 秒一片空白。
+      //
+      //   日志是观测手段，不该被状态守卫吞掉；`seq`/`mounted` 只决定后面
+      //   要不要 setState / 自动重试。
+      final stale = seq != _openSeq;
+      AppLog.e(
+        'player',
+        '打开失败 ${_detail.name} · ${_episodeName.isEmpty ? '正片' : _episodeName} '
+            '${stale ? '(已切走) ' : ''}url=${redactUrl(target.url)}',
+        e,
+      );
+      if (stale || !mounted) return false;
+      final timedOut = e is TimeoutException;
+      // ★ 网盘直链读不出索引 → 立刻改用壳内 serve host 的 `/chunk` 重取。
+      //
+      //   必须放在 dispose **之前**：`VideoPlayerController.dispose()` 第一件事是
+      //   `await _creatingCompleter!.future`，而 prepare 卡住时它不返回，这里要
+      //   白等 5 秒（实测 18:12:18 失败 → 18:12:23 才走到下面的分支）。
+      //   更糟的是这 5 秒里用户往往已经点了别的线路，`seq` 一变，换路分支就
+      //   永远进不去 —— 18:11:53 那次就是这样：失败后 0.9 秒用户换了 E24，
+      //   日志里连一条「改用壳内取流」都没有。
+      //
+      //   实测依据（2026-11-17 18:11:53，玩偶「嫁金钗」[6.0GB]E08.mkv，夸克直链）：
+      //     libmdk 从 0 开始按 32MB 步长纯顺序读，25 秒只走到 209MB / 6422MB，
+      //     期间**一次也没请求文件尾部**；mkv 的 Cues 索引在文件尾，
+      //     读不到索引就只有黑屏。同一部剧的「叫金钗 DV」走 JVM `/chunk`：
+      //     18:13:50 开始 → 18:13:53 就绪，initialize=2768ms。
+      final driveDirect = PlayPageUnwrap.isDriveCdnUrl(target.url);
+      if (!autoAttempt &&
+          timedOut &&
+          driveDirect &&
+          _serveRetriedEpisode != index &&
+          _site.isJarSpider &&
+          index >= 0 &&
+          index < _episodes.length) {
+        _serveRetriedEpisode = index;
+        // 记住「这条线路的网盘直链读不动」：同一线路的下一集直接走壳内取流，
+        // 不再让用户每集都白等一次超时。
+        _driveServePreferred.add('${_site.key}|$_flag');
+        AppLog.w(
+          'player',
+          '网盘直链读不到索引，改用壳内取流重试 index=$index '
+              'url=${redactUrl(target.url)}',
+        );
+        setState(() {
+          _resolving = true;
+          _buffering = true;
+          _error = '';
+        });
+        _toast('大文件直链读取超时，正在改用壳内取流');
+        unawaited(() async {
+          final again = await app.sourceService.replayViaServe(
+            site: _site,
+            config: app.config ?? const SiteConfig(),
+            flag: _flag,
+            rawUrl: _episodes[index].url,
+          );
+          if (!mounted) return;
+          if (again == null || !again.playable) {
+            AppLog.w(
+              'player',
+              '壳内取流也未取到，改走直连（本集不再重试壳内）index=$index',
+            );
+            // ★ 这里**不能**把 `_serveRetriedEpisode` 重置回 -1。
+            //
+            //   实测 2026-11-18 11:02:43 → 11:03:02 出现过死循环：壳内取流失败
+            //   → 重置标记 → 用直链重开 → 看门狗 2.5 秒又判死 → 再次尝试壳内
+            //   → 又失败……每 6.5 秒一轮，用户看到的是「一直在转圈」。
+            //
+            //   现在保留标记：本集的壳内取流已经试过且失败了，就老实用直链，
+            //   由看门狗之外的正常流程处理（`bypassRelay: true` 让 libmdk 自己
+            //   去顺序读，5.7GB 虽然慢但不至于原地打转）。
+            _driveServePreferred.remove('${_site.key}|$_flag');
+            unawaited(
+              _openEpisode(
+                index: index,
+                play: target,
+                startMs: startMs,
+                bypassRelay: true,
+              ),
+            );
+            return;
+          }
+          unawaited(_openEpisode(index: index, play: again, startMs: startMs));
+        }());
+        return false;
+      }
       final controller = _controller;
       _controller = null;
       controller?.removeListener(_onPlayerValue);
       try {
-        await controller?.dispose();
+        // 同上：prepare 卡住时 dispose 会无限挂起，失败分支也必须限时，
+        // 否则后面「自动重新取链 / 换源」的重试永远不会开始。
+        await controller?.dispose().timeout(const Duration(seconds: 5));
       } catch (_) {
         // 释放失败不影响后续提示 / 重新取链
       }
+      // ★ `await` 之后必须重新检查 mounted：dispose 释放内核可能要几百毫秒，
+      //   这期间用户完全可能已经退出播放页（或切集把本页 pop 掉）。
+      //   下面几处 `setState` 都在这条 await 之后 —— 漏检会在已销毁的
+      //   State 上调 setState，抛 `Null check operator used on a null value`
+      //   （栈顶是 framework.dart 的 State.setState）。实测今天报过 6 次，
+      //   每次都是「某条线路失败后立刻切集 / 返回」的场景。
+      if (seq != _openSeq || !mounted) return false;
       // 加固壳/网盘源的地址是本机 JVM 的 /chunk、/proxy：JVM 已退出或端口没起来时
       // fvp 只会报 invalid or unsupported media。自动重新取链一次（会重起常驻进程）。
       final localSpiderUrl =
           target.url.contains('127.0.0.1') &&
           (target.url.contains('/chunk') || target.url.contains('/proxy'));
-      final timedOut = e is TimeoutException;
-      AppLog.e(
-        'player',
-        '打开失败 ${_detail.name} · ${_episodeName.isEmpty ? '正片' : _episodeName} '
-            'url=${redactUrl(target.url)}',
-        e,
-      );
       // 4K / 大码率清单经中继初始化超时：再试一次直连上游，避免一直转圈。
       // 自动换线尝试不再占用时间做直连重试，直接交给下一条线路。
       if (!autoAttempt &&
           timedOut &&
+          !driveDirect &&
           !bypassRelay &&
           source.url != target.url &&
           _directRetriedEpisode != index) {
@@ -921,6 +1204,8 @@ class _PlayerPageState extends State<PlayerPage>
           : dashLine
           ? '该线路是 DASH(MPD) 格式，内置播放内核不支持；请切换到其它线路'
           : '播放器打开失败：$e';
+      // 走到这里可能已经过若干 async 分支，同样要防止在已销毁的 State 上 setState。
+      if (seq != _openSeq || !mounted) return false;
       setState(() {
         _resolving = false;
         _buffering = false;
@@ -929,6 +1214,69 @@ class _PlayerPageState extends State<PlayerPage>
       _afterFailure(message, autoAttempt: autoAttempt, startMs: startMs);
       return false;
     }
+  }
+
+  /// 看门狗：判定「播放器只在纯顺序读、从不 seek 文件尾」就提前失败。
+  ///
+  /// 实测依据（2026-11-17 18:11:53，玩偶「嫁金钗」[6.0GB]E08.mkv，夸克直链）：
+  ///
+  /// ```
+  /// 18:11:53  Range bytes=0-          → 8MB
+  /// 18:11:55  Range bytes=8388608-    → +32MB
+  /// 18:11:59  Range bytes=41943040-   → +32MB
+  /// …         每 3~5 秒推进 32MB，25 秒共走到 209MB / 6422MB
+  /// 18:12:18  打开失败 TimeoutException after 0:00:25
+  /// ```
+  ///
+  /// mkv 的 Cues 索引在文件尾 6.42GB 处，读不到索引就没有首帧。同一部剧的
+  /// mp4（1.3GB）第二个请求就是 `bytes=1398159625-`（正好文件尾），968ms 开画。
+  ///
+  /// 判据全部来自该样本，留足余量：≥3 条请求、走过 <20%、从未摸尾部。
+  ///
+  /// ★ 观察窗口从 5 秒缩到 2.5 秒（2026-11-17 20:01:24 实测依据）：
+  ///   那台盘的 CDN 当时 32MB 一片只要 0.15~3.3 秒，3 条请求在 **5.3 秒**内
+  ///   就凑齐了（日志 `requests=3 … elapsed=5329ms`）。判据是「≥3 条请求」，
+  ///   时间只是防止刚起播就误判的下限；5 秒这个数字让每一次要换路的情况都
+  ///   白等 1.7 秒。缩到 2.5 秒仍比 3 条请求的自然耗时短得多，不会误伤。
+  ({Future<void> future, void Function() cancel, bool Function() fired})
+  _watchSequentialOnly(String url) {
+    var done = false;
+    var hit = false;
+    final completer = Completer<void>();
+    // ★ 这里**不能**调 PlaySeekProbe.instance.reset()。
+    //
+    //   连点几集时多个播放器实例共存，每个实例进来都重置一次，会把别的实例
+    //   刚写入的样本清掉 —— 计时永远从 0 开始，判据永远不成立。
+    //   实测 2026-11-18：单独播放能正常判死（13:15 / 13:16 / 13:31），
+    //   而 13:23 连续切三集时三次全部走满 25 秒超时，一次都没判死。
+    //
+    //   现在探针是滑动时间窗口，靠样本自身过期，不需要也不允许外部重置。
+    final timer = Timer.periodic(const Duration(milliseconds: 250), (t) {
+      if (done) {
+        t.cancel();
+        return;
+      }
+      final snap = PlaySeekProbe.instance;
+      if (!snap.looksSequentialOnly()) {
+        return;
+      }
+      hit = true;
+      done = true;
+      t.cancel();
+      AppLog.w(
+        'player',
+        '判定为纯顺序读（从不 seek 尾部），提前放弃 ${redactUrl(url)} | $snap',
+      );
+      if (!completer.isCompleted) completer.complete();
+    });
+    return (
+      future: completer.future,
+      cancel: () {
+        done = true;
+        timer.cancel();
+      },
+      fired: () => hit,
+    );
   }
 
   Future<PlayResult?> _resolve(int index) async {
@@ -1157,6 +1505,10 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   Future<void> _disposeControllerForSwitch() async {
+    // 自动换线同理：旧线路的转发会话必须先掐掉，否则它会继续占着带宽。
+    LocalRelay.instance.releasePlaySessions();
+    // 换线路就是换片：探针窗口同样要清，理由见 _openEpisode 里的说明。
+    PlaySeekProbe.instance.reset();
     final old = _controller;
     _controller = null;
     old?.removeListener(_onPlayerValue);
@@ -1164,7 +1516,8 @@ class _PlayerPageState extends State<PlayerPage>
     if (future == null) return;
     _controllerDisposePending = future;
     try {
-      await future;
+      // 自动换线也一样：prepare 卡住时 dispose 不会返回，最多等 5 秒。
+      await future.timeout(const Duration(seconds: 5));
     } catch (_) {
       // 释放失败不影响下一只初始化
     } finally {
@@ -1303,6 +1656,7 @@ class _PlayerPageState extends State<PlayerPage>
       _error = '';
       _directRetriedEpisode = -1;
       _mediaRetriedEpisode = -1;
+      _serveRetriedEpisode = -1;
     });
     _toast('已切换到线路「${flag.isEmpty ? '默认线路' : flag}」');
     await _openEpisode(index: index);
@@ -1315,6 +1669,8 @@ class _PlayerPageState extends State<PlayerPage>
       (_) => _saveProgress(),
     );
   }
+
+
 
   Future<void> _saveProgress() async {
     if (_live) return;
@@ -1939,6 +2295,7 @@ class _PlayerPageState extends State<PlayerPage>
     );
   }
 
+
   Widget _overlayColumn(List<Widget> lines, {bool end = false}) {
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -2023,7 +2380,17 @@ class _PlayerPageState extends State<PlayerPage>
         final left = _duration - _position;
         return left.isNegative ? null : '-${_fmtOverlay(left)}';
       case 'net':
-        final bits = _netSmoother.value;
+        // ★ 数据源改成中继的真实转发字节，**显示格式保持原版不变**。
+        //
+        //   原版读的是 fvp 的 `MediaInfo.bitRate`，那是容器里写的标称码率：
+        //   奥德赛 82.2G 那条 Remux 读出来是 0，右下角就一直空着。中继 `/play`
+        //   是播放数据的必经之路，在那里数字节才是真正的下行速率。
+        //   格式与原版逐字一致（`12.3 Mb/s` / `860 kb/s`），只换数据源；
+        //   只有没走中继的线路（fvp 直连）才退回标称码率。
+        final relayBytes = PlaySpeedMeter.instance.bytesPerSecond;
+        final bits = relayBytes > 0
+            ? relayBytes * 8.0
+            : _netSmoother.value.toDouble();
         if (bits <= 0) return null;
         return bits >= 1000000
             ? '${(bits / 1000000).toStringAsFixed(1)} Mb/s'
@@ -3249,3 +3616,8 @@ class _BufferedBarPainter extends CustomPainter {
       oldDelegate.buffered != buffered ||
       oldDelegate.inset != inset;
 }
+
+
+
+
+
