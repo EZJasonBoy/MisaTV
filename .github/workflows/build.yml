@@ -7,7 +7,14 @@ on:
     branches: [mod, main]
   pull_request:
     branches: [mod, main]
+  # 发 Release 时出正式包并挂到 release 资产上。
+  release:
+    types: [published]
   workflow_dispatch:
+
+# 需要写权限才能把产物挂到 release 资产（gh release upload）。
+permissions:
+  contents: write
 
 concurrency:
   group: build-${{ github.ref }}
@@ -77,13 +84,44 @@ jobs:
       - name: 构建 Windows Release
         run: flutter build windows --release
 
+      - name: 打包（排除 userdata）
+        shell: pwsh
+        run: |
+          $src = "build/windows/x64/runner/Release"
+          if (-not (Test-Path $src)) { throw "构建产物不存在：$src" }
+          $stage = Join-Path $env:RUNNER_TEMP "misatv-win"
+          Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          # 显式排除 userdata：本地跑过会生成订阅 / 历史 / 登录态，绝不能进发布包。
+          Copy-Item -Path (Join-Path $src '*') -Destination $stage -Recurse -Force -Exclude 'userdata'
+          $zip = "MisaTV-windows-x64.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -CompressionLevel Optimal
+          # 断言：包里不能出现 userdata，防止排除逻辑失效后静默上线。
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $a = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $zip).Path)
+          $bad = @($a.Entries | Where-Object { $_.FullName -like 'userdata*' })
+          $count = $a.Entries.Count
+          $a.Dispose()
+          if ($bad.Count -gt 0) { throw "发布包含有 userdata：$($bad.FullName -join ', ')" }
+          Write-Host "文件数=$count 体积=$((Get-Item $zip).Length) 字节"
+
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
           name: MisaTV-windows-x64
-          path: build/windows/x64/runner/Release/
+          path: MisaTV-windows-x64.zip
           if-no-files-found: error
           retention-days: 14
+
+      - name: 挂到 Release 资产
+        if: github.event_name == 'release'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            "MisaTV-windows-x64.zip" --clobber
 
       - name: 失败时打印诊断
         if: failure()
