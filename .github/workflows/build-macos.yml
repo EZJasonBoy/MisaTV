@@ -43,8 +43,17 @@ jobs:
         run: flutter analyze
 
       - name: 单元测试
-        # 与 Windows 工作流一致：并行 isolate 会让整套测试偶发整体中止。
-        run: flutter test --reporter compact --concurrency=1
+        # 与 Windows 工作流一致：整套测试偶发被整体中止，用重试吸收，
+        # 连试 3 次仍失败才是真实失败。
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            echo "--- 第 $attempt 次尝试"
+            if flutter test --reporter compact --concurrency=1; then exit 0; fi
+            echo "::warning::第 $attempt 次测试失败，重试"
+          done
+          echo "::error::连续 3 次测试失败"
+          exit 1
 
       - name: 构建 macOS Release
         run: flutter build macos --release

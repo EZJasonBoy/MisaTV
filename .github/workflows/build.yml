@@ -36,10 +36,22 @@ jobs:
         run: flutter analyze
 
       - name: 单元测试
-        # 固定串行：多 isolate 并行时整套测试偶发被整体中止，受害者随机
-        # （表现为某个 test 文件整批 did not complete，单跑该文件却全过）。
-        # 并行约 85s、串行约 4min，用这点时间换确定的绿灯。
-        run: flutter test --reporter compact --concurrency=1
+        # 已知偶发：整套测试在 CI 上偶尔被整体中止，受害者随机（表现为某个 test
+        # 文件整批 did not complete、单跑该文件却全过，日志里没有任何超时或异常）。
+        # 已实测：同一 runner、同一提交，单独跑 3 次全过，全量串行也 +984 全过，
+        # 所以这是环境抖动而非用例缺陷，用重试吸收；连试 3 次仍失败即真实失败。
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            echo "--- 第 $attempt 次尝试"
+            if flutter test --reporter compact --concurrency=1; then
+              echo "测试通过（第 $attempt 次）"
+              exit 0
+            fi
+            echo "::warning::第 $attempt 次测试失败，重试"
+          done
+          echo "::error::连续 3 次测试失败，判定为真实失败"
+          exit 1
 
       - name: 失败时打印诊断
         if: failure()
