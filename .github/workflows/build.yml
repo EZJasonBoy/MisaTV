@@ -36,7 +36,10 @@ jobs:
         run: flutter analyze
 
       - name: 单元测试
-        run: flutter test --reporter compact
+        # 固定串行：多 isolate 并行时整套测试偶发被整体中止，受害者随机
+        # （表现为某个 test 文件整批 did not complete，单跑该文件却全过）。
+        # 并行约 85s、串行约 4min，用这点时间换确定的绿灯。
+        run: flutter test --reporter compact --concurrency=1
 
       - name: 失败时打印诊断
         if: failure()

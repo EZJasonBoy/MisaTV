@@ -43,7 +43,8 @@ jobs:
         run: flutter analyze
 
       - name: 单元测试
-        run: flutter test --reporter compact
+        # 与 Windows 工作流一致：并行 isolate 会让整套测试偶发整体中止。
+        run: flutter test --reporter compact --concurrency=1
 
       - name: 构建 macOS Release
         run: flutter build macos --release
