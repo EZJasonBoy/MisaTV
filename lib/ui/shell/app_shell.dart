@@ -250,8 +250,11 @@ class _AppShellState extends State<AppShell> with TickerProviderStateMixin {
       ],
     );
 
+    // clamp 防止个别 ROM 返回异常大的 bottom 值把横条抬得过高。
+    final gestureInset =
+        MediaQuery.of(context).viewPadding.bottom.clamp(0.0, 48.0);
     final navBar = Padding(
-      padding: const EdgeInsets.fromLTRB(12, 4, 12, 10),
+      padding: EdgeInsets.fromLTRB(12, 4, 12, 10 + gestureInset),
       child: Center(
         child: ConstrainedBox(
           constraints: BoxConstraints(maxWidth: barMaxWidth),
@@ -316,7 +319,7 @@ class _AppShellState extends State<AppShell> with TickerProviderStateMixin {
     );
 
     // 横条连同外边距的总高度（4 + 5 + barHeight + 5 + 10）。
-    final navTotalHeight = barHeight + 24;
+    final navTotalHeight = barHeight + 24 + gestureInset;
     // 鼠标进入窗口底部这个区域时把横条拉出。
     final revealZone = navTotalHeight + 20;
     final autoHide = app.navBarAutoHide;

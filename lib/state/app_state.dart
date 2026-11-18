@@ -349,7 +349,8 @@ class AppState extends ChangeNotifier {
   DanmakuSettings danmakuSettings = DanmakuSettings.defaults();
   ContentFilterSettings contentFilter = ContentFilterSettings.defaults();
 
-  /// JVM 运行时是否就绪：就绪后 JAR / DEX 蜘蛛源才计入可用站点。
+  /// JAR / DEX 蜘蛛源是否可用：桌面端取决于 JVM 运行时是否已安装，
+  /// 安卓端由 ART / DexClassLoader 原生加载，天然就绪。
   bool jarReady = false;
 
   static const accentPalette = <Color>[
@@ -635,7 +636,7 @@ class AppState extends ChangeNotifier {
 
   /// 安装 / 删除 JVM 运行时后刷新可用性（触发界面重算）。
   Future<void> refreshJarReady() async {
-    final ready = await JvmRuntime.instance.installed();
+    final ready = await JvmRuntime.jarSpiderReady();
     if (ready == jarReady) return;
     jarReady = ready;
     _syncGlobalJar();
@@ -941,7 +942,7 @@ class AppState extends ChangeNotifier {
           ? liveProfiles.first.id
           : null;
     }
-    jarReady = await JvmRuntime.instance.installed();
+    jarReady = await JvmRuntime.jarSpiderReady();
     if (!playerWindow &&
         jarReady &&
         profiles.any(
@@ -3625,6 +3626,9 @@ class AppState extends ChangeNotifier {
             .where((e) => !_isGuestCredential(e.key, e.value.extra['guest']))
             .map((e) => MapEntry(e.key, e.value.cookie.trim())),
       );
+    // 只记 provider 名，绝不把 Cookie 写进日志；下一份日志可直接判断
+    // 「没登录」到底是凭据层没注入，还是壳层没读到。
+    AppLog.i('drive', '凭据已注入蜘蛛 provider=${driveTokens.keys.toList()}');
   }
 
   /// 该凭据是否已被在线探测判为访客态（不能注入蜘蛛）。
@@ -3757,12 +3761,18 @@ class AppState extends ChangeNotifier {
     Map<String, String>? extra,
   }) async {
     final previous = driveAccounts[provider];
+    // 重新扫码 / 重新粘贴的是一条全新凭据，不能继承上一条的「访客态」标记：
+    // 否则 _syncDriveTokens 会继续把它过滤掉，刚登录完蜘蛛仍提示未配置 Cookie。
+    // 登录态由后面的 _refreshDriveSession 重新判定（判定为访客会再次打标记）。
+    final merged = <String, String>{
+      ...(extra ?? previous?.extra ?? const <String, String>{}),
+    }..remove('guest');
     final account = DriveAccount(
       provider: provider,
       cookie: cookie.trim(),
       username: (username ?? previous?.username ?? '').trim(),
       updatedAt: DateTime.now().millisecondsSinceEpoch,
-      extra: extra ?? previous?.extra ?? const {},
+      extra: merged,
     );
     if (account.cookie.isEmpty && (account.extra.isEmpty)) {
       throw AppException('登录凭据为空');

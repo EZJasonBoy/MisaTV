@@ -32,6 +32,7 @@ import '../widgets/poster_card.dart';
 import '../immersive/designed_title.dart';
 import '../immersive/hero_title_style.dart';
 import '../immersive/title_tint.dart';
+import '../immersive/immersive_metrics.dart';
 import '../immersive/immersive_widgets.dart';
 import 'player_page.dart';
 
@@ -1127,6 +1128,7 @@ class _DetailPageState extends State<DetailPage> {
         : _cleanIntroText(douban?.intro ?? '');
     final rating = douban?.rating;
     final cast = _castMembers(detail).take(8).toList();
+    final m = ImmersiveMetrics.of(context);
     final recs = _extra?.recommendations.take(10).toList() ?? const [];
     final typeLabel = switch (douban?.mediaType) {
       'movie' => '电影',
@@ -1140,7 +1142,7 @@ class _DetailPageState extends State<DetailPage> {
     final controller = _immersiveEpsScroll ??= ScrollController();
     final bottomScroll = _immersiveBottomScroll ??= ScrollController();
     final bottomHeight = (MediaQuery.sizeOf(context).height * 0.31)
-        .clamp(244.0, 300.0)
+        .clamp(m.compact ? 190.0 : 244.0, m.compact ? 240.0 : 300.0)
         .toDouble();
 
     final currentIndex = history == null
@@ -1239,7 +1241,7 @@ class _DetailPageState extends State<DetailPage> {
                 left: 0,
                 right: 0,
                 bottom: 0,
-                height: 320,
+                height: m.compact ? 220 : 320,
                 child: DecoratedBox(
                   decoration: BoxDecoration(
                     gradient: LinearGradient(
@@ -1257,7 +1259,7 @@ class _DetailPageState extends State<DetailPage> {
                 child: Column(
                   children: [
                     Padding(
-                      padding: const EdgeInsets.fromLTRB(44, 18, 34, 0),
+                      padding: EdgeInsets.fromLTRB(m.gutter, 18, m.gutter, 0),
                       child: Row(
                         children: [
                           Row(
@@ -1345,12 +1347,15 @@ class _DetailPageState extends State<DetailPage> {
                     ),
                     Expanded(
                       child: Padding(
-                        padding: const EdgeInsets.fromLTRB(56, 8, 56, 10),
+                        padding: EdgeInsets.fromLTRB(m.gutter, 8, m.gutter, 10),
                         child: Row(
                           crossAxisAlignment: CrossAxisAlignment.center,
                           children: [
                             SizedBox(
-                              width: MediaQuery.sizeOf(context).width * 0.52,
+                              width: m.compact
+                                  ? MediaQuery.sizeOf(context).width -
+                                      m.gutter * 2
+                                  : MediaQuery.sizeOf(context).width * 0.52,
                               child: LayoutBuilder(
                                 builder: (context, constraints) =>
                                     SingleChildScrollView(
@@ -1538,7 +1543,7 @@ class _DetailPageState extends State<DetailPage> {
                     ),
                     Container(
                       height: bottomHeight,
-                      padding: const EdgeInsets.fromLTRB(44, 14, 44, 0),
+                      padding: EdgeInsets.fromLTRB(m.gutter, 14, m.gutter, 0),
                       decoration: BoxDecoration(
                         color: Colors.black.withValues(alpha: 0.46),
                         border: Border(

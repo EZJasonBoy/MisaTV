@@ -257,6 +257,9 @@ class SettingsPageState extends State<SettingsPage> {
     await showDialog<void>(
       context: context,
       builder: (ctx) => AlertDialog(
+        // 手机上缩小默认留白，给单行横排留出足够宽度，避免按钮被挤压。
+        insetPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 24),
+        contentPadding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
         title: const Text('网盘账户'),
         content: SizedBox(
           width: 520,
@@ -1356,6 +1359,15 @@ class SettingsPageState extends State<SettingsPage> {
                           contentPadding: EdgeInsets.zero,
                         ),
                         SwitchListTile.adaptive(
+                          value: app.playerSettings.autoLandscape,
+                          onChanged: (v) => app.setPlayerSettings(
+                            app.playerSettings.copyWith(autoLandscape: v),
+                          ),
+                          title: const Text('播放时自动横屏'),
+                          subtitle: const Text('移动端进入播放器自动横屏并隐藏系统栏'),
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                        SwitchListTile.adaptive(
                           value: app.playerSettings.autoSwitchLine,
                           onChanged: (v) => app.setPlayerSettings(
                             app.playerSettings.copyWith(autoSwitchLine: v),
@@ -1428,6 +1440,52 @@ class SettingsPageState extends State<SettingsPage> {
                           title: const Text('m3u8 去广告'),
                           subtitle: const Text('点播清单播放前清洗广告分段（启发式，默认关）'),
                           contentPadding: EdgeInsets.zero,
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  _Section(
+                    title: '解码内核',
+                    icon: Icons.memory_rounded,
+                    collapsible: true,
+                    initiallyExpanded: false,
+                    trailing: Text(
+                      app.playerSettings.useFfmpeg ? 'FFmpeg/libmdk' : '系统 ExoPlayer',
+                      style: theme.textTheme.labelSmall,
+                    ),
+                    summary: Text(
+                      app.playerSettings.useFfmpeg
+                          ? '已启用 FFmpeg/libmdk 解码，兼容更多编码'
+                          : '使用系统 ExoPlayer；如部分源放不动可开启',
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: theme.colorScheme.onSurface.withValues(alpha: 0.45),
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        SwitchListTile.adaptive(
+                          value: app.playerSettings.useFfmpeg,
+                          onChanged: (v) => app.setPlayerSettings(
+                            app.playerSettings.copyWith(useFfmpeg: v),
+                          ),
+                          title: const Text('FFmpeg 解码内核'),
+                          subtitle: const Text(
+                            '安卓端用 FFmpeg/libmdk 解码，兼容更多编码与封装；'
+                            '关闭回落系统 ExoPlayer。开启后重开播放器即生效，'
+                            '彻底关闭建议重启 App',
+                          ),
+                          secondary: const SizedBox(width: 20),
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                        const SizedBox(height: 10),
+                        Text(
+                          '提示：若某源用系统播放器放不动，可开启本项；'
+                          '若开启后画面异常或闪退，关掉即回落系统播放器。',
+                          style: theme.textTheme.labelSmall?.copyWith(
+                            color: theme.colorScheme.onSurface.withValues(alpha: 0.5),
+                          ),
                         ),
                       ],
                     ),
