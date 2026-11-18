@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 /// 沉浸观影模式的响应式尺寸。
 ///
-/// 这套 UI 原本按电视 / 桌面宽屏设计：左右各 56 留白、310 宽横图卡片、
+/// 这套 UI 原本按电视 / 桌面宽屏设计：左右各 56 留白、150 宽竖版海报卡片、
 /// 单行排 6 个导航 tab、Hero 描述框固定 760 宽。手机竖屏下这些数值会
 /// 横向溢出，或把内容挤成一条窄柱。
 ///
@@ -41,13 +41,14 @@ class ImmersiveMetrics {
   /// Hero 高度：宽屏铺满整屏，手机约半屏（下面还能看到分类与货架）。
   double get heroHeight => compact ? size.height * 0.48 : size.height;
 
-  /// 横向货架的卡片尺寸。
-  double get shelfHeight => compact ? 168.0 : 232.0;
-  double get shelfCardWidth => compact ? 200.0 : 310.0;
+  /// 竖版海报货架的卡片尺寸（2:3 封面 + 标题）。
+  double get shelfHeight => compact ? 240.0 : 300.0;
+  double get shelfCardWidth => compact ? 112.0 : 150.0;
 
-  /// 网格卡片高度（横图接近 16:9）。
-  double get cardExtent => compact ? 190.0 : 236.0;
-  double get categoryCardExtent => compact ? 200.0 : 250.0;
+  /// 网格里的竖版海报卡片：宽度上限与整格高度（含片名）。
+  double get posterMaxExtent => compact ? 110.0 : 190.0;
+  double get cardExtent => compact ? 270.0 : 380.0;
+  double get categoryCardExtent => compact ? 280.0 : 390.0;
 
   /// 直播频道卡片宽度：手机占满一行，宽屏保持 232。
   double get liveTileWidth => compact ? size.width - gutter * 2 : 232.0;

@@ -31,9 +31,11 @@ import '../widgets/mouse_drag_scroll.dart';
 import '../widgets/poster_card.dart';
 import '../immersive/designed_title.dart';
 import '../immersive/hero_title_style.dart';
+import '../immersive/immersive_category_page.dart';
 import '../immersive/title_tint.dart';
 import '../immersive/immersive_metrics.dart';
 import '../immersive/immersive_widgets.dart';
+import 'folder_page.dart';
 import 'player_page.dart';
 
 class DetailPage extends StatefulWidget {
@@ -63,6 +65,10 @@ class _DetailPageState extends State<DetailPage> {
   bool _initialized = false;
   DoubanInfo? _douban;
   DoubanDetailExtra? _extra;
+
+  /// 小窗口详情页背景：优先用补图逻辑找到的高质量横图，失败再退回竖版封面。
+  String _backdropUrl = '';
+  String _backdropKey = '';
 
   /// 播放器正在打开（取链 / 压栈）：防止连续点击重复解析、打开多份。
   bool _opening = false;
@@ -108,6 +114,39 @@ class _DetailPageState extends State<DetailPage> {
       }
     }
     return app.activeSite;
+  }
+
+  /// 详情页展示名：detailContent 只返回网盘目录时，`detail.name` 通常是第一个
+  /// 目录名（如「夸克网盘 51」），要回落到用户点击的资源名。
+  String _displayNameOf(VodDetail detail) {
+    final itemName = widget.item.name.trim();
+    if (detail.flags.isEmpty &&
+        detail.folders.isNotEmpty &&
+        itemName.isNotEmpty) {
+      return itemName;
+    }
+    final name = detail.name.trim();
+    return name.isNotEmpty ? name : itemName;
+  }
+
+  Future<void> _loadBackdrop(
+    String name,
+    String year,
+    String altTitle,
+  ) async {
+    final title = name.trim();
+    if (title.isEmpty) return;
+    final key = '$title|$year|$altTitle';
+    if (key == _backdropKey) return;
+    _backdropKey = key;
+    final app = AppScope.of(context);
+    final url = await app.artworkService.backdrop(
+      title,
+      year: year,
+      altTitle: altTitle,
+    );
+    if (!mounted || key != _backdropKey) return;
+    setState(() => _backdropUrl = url ?? '');
   }
 
   Future<void> _load() async {
@@ -189,9 +228,7 @@ class _DetailPageState extends State<DetailPage> {
   /// 豆瓣元数据：封面 / 简介 / 评分 / 相关推荐 / 影评。失败不影响选集与播放。
   Future<void> _loadDouban(VodDetail detail) async {
     final app = AppScope.of(context);
-    final name = detail.name.trim().isEmpty
-        ? widget.item.name.trim()
-        : detail.name.trim();
+    final name = _displayNameOf(detail);
     if (name.isEmpty) return;
     final info = await app.discoverService.loadInfo(name, year: detail.year);
     if (!mounted) return;
@@ -199,6 +236,9 @@ class _DetailPageState extends State<DetailPage> {
       setState(() => _douban = info);
       unawaited(_loadEpisodeStills(detail));
     }
+    unawaited(
+      _loadBackdrop(name, detail.year, info?.originalTitle ?? ''),
+    );
     final extra = await app.discoverService.loadDetailExtra(
       name,
       year: detail.year,
@@ -1041,8 +1081,7 @@ class _DetailPageState extends State<DetailPage> {
     final item = widget.item;
     // 个别 JAR 源（如立播）详情页字段会解析成空：标题 / 海报回落到列表项，
     // 否则沉浸详情页会只剩背景和按钮，看起来像「文字和封面都没了」。
-    final detailName = (detail?.name ?? '').trim();
-    final name = detailName.isNotEmpty ? detailName : item.name;
+    final name = detail == null ? item.name : _displayNameOf(detail);
     final rawYear = (detail?.year ?? douban?.year ?? '').trim();
     final year = _validYear(rawYear) ? rawYear : '';
     final poster = (detail?.cleanPic.isNotEmpty ?? false)
@@ -1063,6 +1102,7 @@ class _DetailPageState extends State<DetailPage> {
                 child: ImmersiveBackdrop(
                   title: name,
                   year: year,
+                  altTitle: douban?.originalTitle ?? '',
                   fallback: poster,
                 ),
               ),
@@ -1088,6 +1128,7 @@ class _DetailPageState extends State<DetailPage> {
                 child: ImmersiveBackdrop(
                   title: name,
                   year: year,
+                  altTitle: douban?.originalTitle ?? '',
                   fallback: poster,
                 ),
               ),
@@ -1114,6 +1155,7 @@ class _DetailPageState extends State<DetailPage> {
 
     final flag = _flag ?? (detail.flags.isNotEmpty ? detail.flags.first : '');
     final episodes = detail.episodeList(flag);
+    final folders = detail.folders;
     final history = app.historyFor(detail.sourceKey, detail.id);
     final genres = douban?.genres.isNotEmpty == true
         ? douban!.genres.take(4).toList()
@@ -1181,6 +1223,23 @@ class _DetailPageState extends State<DetailPage> {
       }
     }
 
+    /// `detailContent` 返回的网盘目录：进入沉浸分类页继续逐层展开。
+    void openFolder(VodItem folder) {
+      final target = site;
+      if (target == null) {
+        _toast('找不到该目录所属的站点');
+        return;
+      }
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => ImmersiveCategoryPage(
+            site: target,
+            sortClass: SortClass(id: folder.id, name: folder.name),
+          ),
+        ),
+      );
+    }
+
     void scrollEpisodes(double delta) {
       if (!controller.hasClients) return;
       final target = (controller.offset + delta).clamp(
@@ -1222,6 +1281,7 @@ class _DetailPageState extends State<DetailPage> {
                 child: ImmersiveBackdrop(
                   title: name,
                   year: year,
+                  altTitle: douban?.originalTitle ?? '',
                   fallback: poster,
                 ),
               ),
@@ -1372,6 +1432,7 @@ class _DetailPageState extends State<DetailPage> {
                                     TitleTint(
                                       title: name,
                                       year: year,
+                                      altTitle: douban?.originalTitle ?? '',
                                       fallbackUrl: poster,
                                       builder: (context, tint) => DesignedTitle(
                                         plan: buildHeroTitlePlan(
@@ -1406,6 +1467,10 @@ class _DetailPageState extends State<DetailPage> {
                                         if (episodes.isNotEmpty)
                                           _ImmersiveMetaChip(
                                             '${episodes.length} 集',
+                                          )
+                                        else if (folders.isNotEmpty)
+                                          _ImmersiveMetaChip(
+                                            '${folders.length} 个目录',
                                           ),
                                         for (final genre in genres)
                                           _ImmersiveMetaChip(genre),
@@ -1463,47 +1528,49 @@ class _DetailPageState extends State<DetailPage> {
                                       ),
                                     ],
                                     const SizedBox(height: 22),
-                                    Row(
-                                      children: [
-                                        FilledButton.icon(
-                                          autofocus: true,
-                                          onPressed: canContinue
-                                              ? playContinue
-                                              : playFromStart,
-                                          icon: const Icon(
-                                            Icons.play_arrow_rounded,
-                                            size: 22,
-                                          ),
-                                          label: Text(
-                                            canContinue ? '继续播放' : '立即播放',
-                                          ),
-                                          style: FilledButton.styleFrom(
-                                            padding: const EdgeInsets.symmetric(
-                                              horizontal: 26,
-                                              vertical: 17,
-                                            ),
-                                          ),
-                                        ),
-                                        if (canContinue) ...[
-                                          const SizedBox(width: 12),
-                                          OutlinedButton.icon(
-                                            onPressed: playFromStart,
+                                    if (episodes.isNotEmpty)
+                                      Row(
+                                        children: [
+                                          FilledButton.icon(
+                                            autofocus: true,
+                                            onPressed: canContinue
+                                                ? playContinue
+                                                : playFromStart,
                                             icon: const Icon(
-                                              Icons.replay_rounded,
-                                              size: 20,
+                                              Icons.play_arrow_rounded,
+                                              size: 22,
                                             ),
-                                            label: const Text('从头播放'),
-                                            style: OutlinedButton.styleFrom(
+                                            label: Text(
+                                              canContinue ? '继续播放' : '立即播放',
+                                            ),
+                                            style: FilledButton.styleFrom(
                                               padding:
                                                   const EdgeInsets.symmetric(
-                                                    horizontal: 22,
+                                                    horizontal: 26,
                                                     vertical: 17,
                                                   ),
                                             ),
                                           ),
+                                          if (canContinue) ...[
+                                            const SizedBox(width: 12),
+                                            OutlinedButton.icon(
+                                              onPressed: playFromStart,
+                                              icon: const Icon(
+                                                Icons.replay_rounded,
+                                                size: 20,
+                                              ),
+                                              label: const Text('从头播放'),
+                                              style: OutlinedButton.styleFrom(
+                                                padding:
+                                                    const EdgeInsets.symmetric(
+                                                      horizontal: 22,
+                                                      vertical: 17,
+                                                    ),
+                                              ),
+                                            ),
+                                          ],
                                         ],
-                                      ],
-                                    ),
+                                      ),
                                     if (cast.isNotEmpty) ...[
                                       const SizedBox(height: 22),
                                       Text(
@@ -1565,7 +1632,9 @@ class _DetailPageState extends State<DetailPage> {
                               Row(
                                 children: [
                                   Text(
-                                    '选集',
+                                    folders.isNotEmpty && episodes.isEmpty
+                                        ? '网盘目录'
+                                        : '选集',
                                     style: theme.textTheme.headlineSmall
                                         ?.copyWith(
                                           fontWeight: FontWeight.w800,
@@ -1574,7 +1643,11 @@ class _DetailPageState extends State<DetailPage> {
                                   ),
                                   const SizedBox(width: 12),
                                   Text(
-                                    '${episodes.length} 集',
+                                    episodes.isNotEmpty
+                                        ? '${episodes.length} 集'
+                                        : (folders.isNotEmpty
+                                              ? '${folders.length} 个目录'
+                                              : '0 集'),
                                     style: theme.textTheme.labelSmall?.copyWith(
                                       color: Colors.white.withValues(alpha: 0.46),
                                     ),
@@ -1607,78 +1680,102 @@ class _DetailPageState extends State<DetailPage> {
                                         ),
                                       ),
                                     ),
-                                  if (currentIndex >= 0)
+                                  if (currentIndex >= 0 && episodes.isNotEmpty)
                                     TextButton(
                                       onPressed: locateCurrent,
                                       child: const Text('定位当前'),
                                     ),
-                                  TextButton(
-                                    onPressed: episodes.isEmpty
-                                        ? null
-                                        : () => _showEpisodePicker(
-                                            detail: detail,
-                                            flag: flag,
-                                            currentIndex: currentIndex,
-                                          ),
-                                    child: const Text('全部选集'),
-                                  ),
-                                  IconButton(
-                                    tooltip: '上一页',
-                                    onPressed: () => scrollEpisodes(-660),
-                                    icon: const Icon(
-                                      Icons.chevron_left_rounded,
-                                      color: Colors.white70,
+                                  if (episodes.isNotEmpty) ...[
+                                    TextButton(
+                                      onPressed: () => _showEpisodePicker(
+                                        detail: detail,
+                                        flag: flag,
+                                        currentIndex: currentIndex,
+                                      ),
+                                      child: const Text('全部选集'),
                                     ),
-                                  ),
-                                  IconButton(
-                                    tooltip: '下一页',
-                                    onPressed: () => scrollEpisodes(660),
-                                    icon: const Icon(
-                                      Icons.chevron_right_rounded,
-                                      color: Colors.white70,
+                                    IconButton(
+                                      tooltip: '上一页',
+                                      onPressed: () => scrollEpisodes(-660),
+                                      icon: const Icon(
+                                        Icons.chevron_left_rounded,
+                                        color: Colors.white70,
+                                      ),
                                     ),
-                                  ),
+                                    IconButton(
+                                      tooltip: '下一页',
+                                      onPressed: () => scrollEpisodes(660),
+                                      icon: const Icon(
+                                        Icons.chevron_right_rounded,
+                                        color: Colors.white70,
+                                      ),
+                                    ),
+                                  ],
                                 ],
                               ),
+                              if (folders.isNotEmpty) ...[
+                                const SizedBox(height: 6),
+                                SizedBox(
+                                  height: 52,
+                                  child: ListView.separated(
+                                    scrollDirection: Axis.horizontal,
+                                    itemCount: folders.length,
+                                    separatorBuilder: (_, _) =>
+                                        const SizedBox(width: 12),
+                                    itemBuilder: (context, index) {
+                                      final folder = folders[index];
+                                      return _ImmersiveFolderChip(
+                                        label: folder.name,
+                                        onTap: () => openFolder(folder),
+                                      );
+                                    },
+                                  ),
+                                ),
+                              ],
                               const SizedBox(height: 6),
-                              SizedBox(
-                                height: 148,
-                                child: episodes.isEmpty
-                                    ? Center(
-                                        child: Text(
-                                          '该线路没有可播放的剧集',
-                                          style: theme.textTheme.bodySmall
-                                              ?.copyWith(
-                                                color: Colors.white.withValues(
-                                                  alpha: 0.52,
+                              if (folders.isEmpty || episodes.isNotEmpty)
+                                SizedBox(
+                                  height: 148,
+                                  child: episodes.isEmpty
+                                      ? Center(
+                                          child: Text(
+                                            '该线路没有可播放的剧集',
+                                            style: theme.textTheme.bodySmall
+                                                ?.copyWith(
+                                                  color: Colors.white.withValues(
+                                                    alpha: 0.52,
+                                                  ),
                                                 ),
-                                              ),
+                                          ),
+                                        )
+                                      : ListView.separated(
+                                          controller: controller,
+                                          scrollDirection: Axis.horizontal,
+                                          itemCount: episodes.length,
+                                          separatorBuilder: (_, _) =>
+                                              const SizedBox(width: 14),
+                                          itemBuilder: (context, index) {
+                                            final episode = episodes[index];
+                                            final selected =
+                                                index == currentIndex;
+                                            return _ImmersiveEpisodeCard(
+                                              episode: episode,
+                                              index: index,
+                                              title: name,
+                                              year: year,
+                                              altTitle:
+                                                  douban?.originalTitle ?? '',
+                                              fallback: poster,
+                                              still:
+                                                  _episodeStills.length > index
+                                                  ? (_episodeStills[index] ?? '')
+                                                  : '',
+                                              selected: selected,
+                                              onTap: () => _playEpisode(index),
+                                            );
+                                          },
                                         ),
-                                      )
-                                    : ListView.separated(
-                                        controller: controller,
-                                        scrollDirection: Axis.horizontal,
-                                        itemCount: episodes.length,
-                                        separatorBuilder: (_, _) =>
-                                            const SizedBox(width: 14),
-                                        itemBuilder: (context, index) {
-                                          final episode = episodes[index];
-                                          final selected = index == currentIndex;
-                                          return _ImmersiveEpisodeCard(
-                                            episode: episode,
-                                            index: index,
-                                            title: name,
-                                            year: year,
-                                            fallback: poster,
-                                            still: _episodeStills.length > index
-                                                ? (_episodeStills[index] ?? '')
-                                                : '',
-                                            selected: selected,
-                                            onTap: () => _playEpisode(index),
-                                          );
-                                        },
-                                      ),
-                              ),
+                                ),
                               if (recs.isNotEmpty) ...[
                                 const SizedBox(height: 10),
                                 Container(
@@ -1838,20 +1935,24 @@ class _DetailPageState extends State<DetailPage> {
       body: Stack(
         children: [
           _Backdrop(
-            image: doubanImageDisplayUrl(backdropImage),
-            headers: isDoubanImageUrl(backdropImage)
+            image: _backdropUrl.isNotEmpty
+                ? _backdropUrl
+                : doubanImageDisplayUrl(backdropImage),
+            headers: _backdropUrl.isNotEmpty
                 ? const <String, String>{}
-                : (detail != null && backdropImage == detail.cleanPic
-                      ? detail.picHeaders
-                      : widget.item.picHeaders),
+                : (isDoubanImageUrl(backdropImage)
+                      ? const <String, String>{}
+                      : (detail != null && backdropImage == detail.cleanPic
+                            ? detail.picHeaders
+                            : widget.item.picHeaders)),
           ),
           SafeArea(
             child: Column(
               children: [
                 _TopBar(
-                  title: (detail?.name ?? '').trim().isNotEmpty
-                      ? detail!.name
-                      : widget.item.name,
+                  title: detail == null
+                      ? widget.item.name
+                      : _displayNameOf(detail),
                   favorite:
                       detail != null &&
                       app.isFavorite(detail.sourceKey, detail.id),
@@ -1910,6 +2011,14 @@ class _DetailPageState extends State<DetailPage> {
                       : LayoutBuilder(
                           builder: (context, constraints) {
                             final narrow = constraints.maxWidth < 760;
+                            final episodes = detail.episodeList(_flag ?? '');
+                            final folders = detail.folders;
+                            // detailContent 只有网盘目录、没有可播线路：
+                            // 选集区改为目录列表，不再显示「暂无选集」。
+                            final folderOnly =
+                                folders.isNotEmpty &&
+                                episodes.isEmpty &&
+                                detail.flags.isEmpty;
                             return SingleChildScrollView(
                               padding: EdgeInsets.fromLTRB(
                                 narrow ? 18 : 32,
@@ -1926,13 +2035,15 @@ class _DetailPageState extends State<DetailPage> {
                                     narrow: narrow,
                                     // JAR 源详情偶尔缺标题 / 海报：用列表项兜底。
                                     fallbackTitle: widget.item.name,
+                                    titleOverride: _displayNameOf(detail),
+                                    showPlay: !folderOnly,
                                     fallbackCover: widget.item.cleanPic,
                                     fallbackCoverHeaders:
                                         widget.item.picHeaders,
                                     introText: introText,
                                     introFromDouban: detail.des.trim().isEmpty,
                                     onExpandIntro: () => _showFullIntro(
-                                      detail.name,
+                                      _displayNameOf(detail),
                                       introText,
                                       fromDouban: detail.des.trim().isEmpty,
                                     ),
@@ -1987,7 +2098,7 @@ class _DetailPageState extends State<DetailPage> {
                                         Row(
                                           children: [
                                             Text(
-                                              '选集',
+                                              folderOnly ? '网盘目录' : '选集',
                                               style: theme.textTheme.titleLarge,
                                             ),
                                             const Spacer(),
@@ -2008,6 +2119,41 @@ class _DetailPageState extends State<DetailPage> {
                                               ),
                                           ],
                                         ),
+                                        if (folders.isNotEmpty) ...[
+                                          const SizedBox(height: 12),
+                                          Wrap(
+                                            spacing: 8,
+                                            runSpacing: 8,
+                                            children: [
+                                              for (final folder in folders)
+                                                OutlinedButton.icon(
+                                                  onPressed: () =>
+                                                      openFolderBrowse(
+                                                        context,
+                                                        folder,
+                                                      ),
+                                                  icon: const Icon(
+                                                    Icons.folder_rounded,
+                                                    size: 18,
+                                                  ),
+                                                  label: ConstrainedBox(
+                                                    constraints:
+                                                        const BoxConstraints(
+                                                          maxWidth: 240,
+                                                        ),
+                                                    child: Text(
+                                                      folder.name.trim().isEmpty
+                                                          ? '未命名目录'
+                                                          : folder.name,
+                                                      maxLines: 1,
+                                                      overflow:
+                                                          TextOverflow.ellipsis,
+                                                    ),
+                                                  ),
+                                                ),
+                                            ],
+                                          ),
+                                        ],
                                         if (detail.flags.isNotEmpty) ...[
                                           const SizedBox(height: 12),
                                           ScrollConfiguration(
@@ -2070,20 +2216,21 @@ class _DetailPageState extends State<DetailPage> {
                                             ),
                                           ),
                                         ],
-                                        const SizedBox(height: 14),
-                                        _EpisodeGrid(
-                                          episodes: detail.episodeList(
-                                            _flag ?? '',
+                                        if (!folderOnly) ...[
+                                          const SizedBox(height: 14),
+                                          _EpisodeGrid(
+                                            episodes: episodes,
+                                            currentIndex:
+                                                history?.flag == _flag
+                                                ? history?.episodeIndex
+                                                : null,
+                                            onTap: (index) =>
+                                                _playEpisode(index),
                                           ),
-                                          currentIndex: history?.flag == _flag
-                                              ? history?.episodeIndex
-                                              : null,
-                                          onTap: (index) => _playEpisode(index),
-                                        ),
-                                        if (detail.flags.isEmpty ||
-                                            detail
-                                                .episodeList(_flag ?? '')
-                                                .isEmpty) ...[
+                                        ],
+                                        if (!folderOnly &&
+                                            (detail.flags.isEmpty ||
+                                                episodes.isEmpty)) ...[
                                           const SizedBox(height: 6),
                                           Row(
                                             children: [
@@ -2105,7 +2252,9 @@ class _DetailPageState extends State<DetailPage> {
                                               ),
                                               TextButton.icon(
                                                 onPressed: () =>
-                                                    _search(detail.name),
+                                                    _search(
+                                                      _displayNameOf(detail),
+                                                    ),
                                                 icon: const Icon(
                                                   Icons.search_rounded,
                                                   size: 18,
@@ -2231,8 +2380,8 @@ class _Backdrop extends StatelessWidget {
                   image,
                   fit: BoxFit.cover,
                   headers: headers.isEmpty ? null : headers,
-                  filterQuality: FilterQuality.low,
-                  cacheWidth: 960,
+                  filterQuality: FilterQuality.medium,
+                  cacheWidth: 1600,
                   errorBuilder: (_, _, _) => const SizedBox.shrink(),
                 ),
               )
@@ -2352,6 +2501,8 @@ class _DetailHeader extends StatelessWidget {
     this.fallbackCover = '',
     this.fallbackCoverHeaders = const <String, String>{},
     this.progress = 0,
+    this.showPlay = true,
+    this.titleOverride = '',
   });
 
   final VodDetail detail;
@@ -2365,6 +2516,12 @@ class _DetailHeader extends StatelessWidget {
   final String playLabel;
   final double progress;
 
+  /// 纯目录详情没有可播剧集：隐藏播放按钮，避免点了只弹「没有可播放地址」。
+  final bool showPlay;
+
+  /// 纯目录详情用列表项名代替 `detail.name`（后者往往是第一个目录名）。
+  final String titleOverride;
+
   /// 详情字段为空时用列表项兜底，避免整页只剩背景和按钮。
   final String fallbackTitle;
   final String fallbackCover;
@@ -2373,9 +2530,10 @@ class _DetailHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final title = detail.name.trim().isNotEmpty
-        ? detail.name
-        : fallbackTitle;
+    final override = titleOverride.trim();
+    final title = override.isNotEmpty
+        ? override
+        : (detail.name.trim().isNotEmpty ? detail.name : fallbackTitle);
     final detailCover = detail.cleanPic.isNotEmpty
         ? detail.cleanPic
         : (douban?.coverUrl ?? '');
@@ -2536,7 +2694,7 @@ class _DetailHeader extends StatelessWidget {
                 SizedBox(height: 150, child: intro),
               ],
               const SizedBox(height: 14),
-              playRow,
+              if (showPlay) playRow,
             ],
           ),
         ],
@@ -2560,7 +2718,7 @@ class _DetailHeader extends StatelessWidget {
                 ] else
                   const Spacer(),
                 const SizedBox(height: 10),
-                playRow,
+                if (showPlay) playRow,
               ],
             ),
           ),
@@ -3549,6 +3707,63 @@ class _ImmersiveLineChip extends StatelessWidget {
   }
 }
 
+class _ImmersiveFolderChip extends StatelessWidget {
+  const _ImmersiveFolderChip({required this.label, required this.onTap});
+
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final text = label.trim().isEmpty ? '未命名目录' : label.trim();
+    return ImmersiveFocusable(
+      onTap: onTap,
+      builder: (context, active) => Container(
+        constraints: const BoxConstraints(minWidth: 140, maxWidth: 280),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: active ? 0.14 : 0.07),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: active
+                ? Colors.white.withValues(alpha: 0.42)
+                : Colors.white.withValues(alpha: 0.10),
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.folder_rounded,
+              size: 18,
+              color: theme.colorScheme.primary.withValues(alpha: 0.9),
+            ),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                text,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.labelLarge?.copyWith(
+                  color: Colors.white.withValues(alpha: active ? 0.94 : 0.78),
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+            const SizedBox(width: 4),
+            Icon(
+              Icons.chevron_right_rounded,
+              size: 16,
+              color: Colors.white.withValues(alpha: 0.46),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _ImmersiveEpisodeCard extends StatelessWidget {
   const _ImmersiveEpisodeCard({
     required this.episode,
@@ -3556,6 +3771,7 @@ class _ImmersiveEpisodeCard extends StatelessWidget {
     required this.title,
     required this.year,
     required this.fallback,
+    this.altTitle = '',
     this.still = '',
     required this.selected,
     required this.onTap,
@@ -3566,6 +3782,9 @@ class _ImmersiveEpisodeCard extends StatelessWidget {
   final String title;
   final String year;
   final String fallback;
+
+  /// 元数据里的英文 / 日文原名，TMDB 匹配用。
+  final String altTitle;
 
   /// TMDB 该集的剧照；空串时继续使用片名横图。
   final String still;
@@ -3623,6 +3842,7 @@ class _ImmersiveEpisodeCard extends StatelessWidget {
                     ImmersiveBackdrop(
                       title: title,
                       year: year,
+                      altTitle: altTitle,
                       fallback: fallback,
                       scrim: true,
                     ),

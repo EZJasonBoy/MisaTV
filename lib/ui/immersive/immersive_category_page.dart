@@ -210,7 +210,7 @@ class _ImmersiveCategoryPageState extends State<ImmersiveCategoryPage> {
                 padding: EdgeInsets.fromLTRB(horizontal, 18, horizontal, 48),
                 sliver: SliverGrid(
                   gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
-                    maxCrossAxisExtent: 360,
+                    maxCrossAxisExtent: m.posterMaxExtent,
                     mainAxisExtent: m.categoryCardExtent,
                     crossAxisSpacing: 20,
                     mainAxisSpacing: 22,
@@ -227,6 +227,7 @@ class _ImmersiveCategoryPageState extends State<ImmersiveCategoryPage> {
                           ? widget.site.displayName
                           : item.remarks,
                       fallback: item.cleanPic,
+                      imageHeaders: item.picHeaders,
                       badge: item.isFolder ? '分类' : '',
                       showText: false,
                       width: double.infinity,

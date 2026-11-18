@@ -36,6 +36,24 @@ class PlayPageUnwrap {
   final Map<String, String> _cache = {};
   final Set<String> _failed = {};
 
+  /// 网盘 CDN 直链的路径通常没有扩展名（靠 query 里的 token 鉴权），
+  /// 不能按「无扩展名 = 播放页」去抓取：整集文件会被 getText 拉下来并超时。
+  static const _directDownloadHosts = <String>[
+    'drive.quark.cn',
+    'drive.uc.cn',
+    'baidupcs.com',
+    'pcs.baidu.com',
+    'aliyundrive.com',
+    'alipan.com',
+  ];
+
+  static bool _isDirectDownloadHost(String host) {
+    for (final domain in _directDownloadHosts) {
+      if (host == domain || host.endsWith('.$domain')) return true;
+    }
+    return false;
+  }
+
   /// 只有疑似播放页/分享页才需要抓取；带媒体扩展名的直链直接放行。
   static bool needsUnwrap(String raw) {
     final uri = Uri.tryParse(raw.trim());
@@ -46,6 +64,7 @@ class PlayPageUnwrap {
     if (host == '127.0.0.1' || host == 'localhost' || host == '::1') {
       return false;
     }
+    if (_isDirectDownloadHost(host)) return false;
     final path = uri.path.toLowerCase();
     const media = [
       '.m3u8',

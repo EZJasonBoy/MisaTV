@@ -48,6 +48,7 @@ import '../services/player/external_playlist.dart';
 import '../services/player/external_players.dart';
 import '../services/player/skip_segments.dart';
 import '../services/relay/local_relay.dart';
+import '../services/relay/relay_access.dart';
 import '../services/relay/proxy_rules.dart';
 import '../services/live_service.dart';
 import '../services/local_store.dart';
@@ -393,6 +394,15 @@ class AppState extends ChangeNotifier {
       if (s.key == activeSiteKey) return s;
     }
     return fallbackSite;
+  }
+
+  /// 按 key 找站点：搜索结果 / 详情目录可能来自非当前源。
+  SourceBean? siteByKey(String key) {
+    if (key.isEmpty) return null;
+    for (final site in config?.sites ?? const <SourceBean>[]) {
+      if (site.key == key) return site;
+    }
+    return null;
   }
 
   /// 自动选源时优先 CMS / JS / PY，最后才用 JAR（部分 JAR 源是加固壳，未必能跑）。
@@ -2630,6 +2640,27 @@ class AppState extends ChangeNotifier {
     if (!relay.running) return play;
     final url = play.url.trim();
     if (!RegExp(r'^https?://', caseSensitive: false).hasMatch(url)) return play;
+    // 蜘蛛返回的本机 `/proxy` / `/play` 地址会带着上游站点的 Origin。
+    // 播放器只是原样转发，中继却会把它当成浏览器请求拦成 403；本机中继
+    // 不使用这个头，交给播放器前去掉，避免「取链成功但播放 403」。
+    if (relay.isRelayUrl(url)) {
+      final stripped = RelayAccessPolicy.withoutBrowserHeaders(play.headers);
+      if (stripped.length != play.headers.length) {
+        AppLog.i(
+          'play',
+          '本机中继地址移除浏览器请求头，避免 relay 误判：${play.headers.keys.join(',')}',
+        );
+        return PlayResult(
+          url: play.url,
+          parse: play.parse,
+          playUrl: play.playUrl,
+          flag: play.flag,
+          headers: stripped,
+          message: play.message,
+          externalLink: play.externalLink,
+        );
+      }
+    }
     // 网盘直链可能不带 header，但依赖本机登录的 Cookie；同样必须经中继注入。
     final provider = _providerForPlay(url, play.flag);
     final lower = url.toLowerCase();

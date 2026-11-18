@@ -9,6 +9,7 @@ import 'package:path/path.dart' as p;
 import '../../core/errors/app_error.dart';
 import '../../core/logging/app_log.dart';
 import '../../core/logging/log_redact.dart';
+import '../artwork/tmdb_network.dart';
 import '../drive/baidu_native.dart';
 import '../live/live_ua_policy.dart';
 import '../drive/drive_descriptor.dart';
@@ -68,6 +69,12 @@ class LocalRelay {
   ///
   /// 首屏卡片和 Hero 预取经常同时请求同一张封面，重复回源既慢又浪费流量。
   final Map<String, Future<void>> _imgCacheInflight = {};
+
+  /// TMDB 图床冷却：官方在部分网络会一直连到超时，失败后 10 分钟内先走镜像。
+  final Map<String, DateTime> _tmdbImageCooldown = {};
+
+  /// TMDB 图片专用客户端：连接超时压到 5 秒，坏域名尽快切镜像。
+  HttpClient? _tmdbImageClient;
 
   static const int _imgCacheLimitBytes = 256 * 1024 * 1024;
   static const int _imgCacheWaterBytes = 200 * 1024 * 1024;
@@ -216,6 +223,7 @@ class LocalRelay {
     _imgCacheDir = null;
     _imgCacheBytes = null;
     _imgCacheInflight.clear();
+    _tmdbImageCooldown.clear();
     try {
       await server?.close(force: true);
     } catch (_) {
@@ -231,8 +239,14 @@ class LocalRelay {
     } catch (_) {
       // 退出阶段忽略
     }
+    try {
+      _tmdbImageClient?.close(force: true);
+    } catch (_) {
+      // 退出阶段忽略
+    }
     _client = null;
     _insecureClient = null;
+    _tmdbImageClient = null;
   }
 
   /// 网盘登录态变化时清掉该 provider 的播放期 Cookie。
@@ -253,7 +267,7 @@ class LocalRelay {
     String provider = '',
   }) {
     if (!running) return url;
-    if (_isRelayUrl(url)) return url;
+    if (isRelayUrl(url)) return url;
     final query = <String, String>{};
     if (Uri.encodeComponent(url).length > _playUrlInlineMax) {
       query['p'] = _rememberPlayTarget(url);
@@ -304,7 +318,8 @@ class LocalRelay {
     return token;
   }
 
-  bool _isRelayUrl(String url) =>
+  /// 是否是本中继自己生成的地址（`/play`、`/proxy`、`/img` 等）。
+  bool isRelayUrl(String url) =>
       url.startsWith(baseUrl) || url.startsWith('http://127.0.0.1:9978/');
 
   Future<void> _handle(HttpRequest request) async {
@@ -1006,13 +1021,12 @@ class LocalRelay {
     };
     // 代理链路抖动时（隧道被对端掐断、节点瞬断）重试一次再放弃：
     // 封面是并发拉取的，偶发失败在界面上就是「有个别封面不出来」。
-    ({HttpClientResponse response, String finalUrl}) opened;
-    try {
-      opened = await _open(target, headers: headers, method: request.method);
-    } catch (_) {
-      await Future<void>.delayed(const Duration(milliseconds: 120));
-      opened = await _open(target, headers: headers, method: request.method);
-    }
+    // TMDB 图床额外按「官方 → 公共镜像 → 备用域名」依次回退。
+    final opened = await _openImage(
+      target,
+      headers: headers,
+      method: request.method,
+    );
     final upstream = opened.response;
     if (guardPrivate && RelayAccessPolicy.isPrivateTarget(opened.finalUrl)) {
       await upstream.drain<void>();
@@ -1084,6 +1098,104 @@ class LocalRelay {
       _imgCacheInflight.remove(cacheKey);
       if (!writeDone.isCompleted) writeDone.complete();
     }
+  }
+
+  /// 图片回源：TMDB 图床按「官方 → 公共镜像 → 备用域名」回退。
+  ///
+  /// 只对 `/t/p/<size>/<file>` 形态的 TMDB 地址生效，其它地址原地址请求。
+  /// 每个候选各带一次传输层重试（隧道被掐断 / 节点瞬断时偶发失败）；
+  /// 全部候选都失败时把最后一个响应原样交给调用方透传状态码。
+  Future<({HttpClientResponse response, String finalUrl})> _openImage(
+    String target, {
+    required Map<String, String> headers,
+    required String method,
+  }) async {
+    final mirrors = tmdbImageMirrors(target);
+    final trackCooldown = mirrors.isNotEmpty;
+    final now = DateTime.now();
+    final fresh = <String>[];
+    final cooled = <String>[];
+    for (final mirror in mirrors) {
+      final until = _tmdbImageCooldown[mirror];
+      if (until != null && until.isAfter(now)) {
+        cooled.add(mirror);
+      } else {
+        fresh.add(mirror);
+      }
+    }
+    final candidates = mirrors.isEmpty
+        ? <String>[target]
+        : <String>[...fresh, ...cooled];
+    ({HttpClientResponse response, String finalUrl})? lastResponse;
+    Object? lastError;
+
+    final client = trackCooldown
+        ? (_tmdbImageClient ??= HttpClient()
+            ..connectionTimeout = const Duration(seconds: 5)
+            ..autoUncompress = false)
+        : null;
+
+    // 单个候选带一次传输层重试；TMDB 多图床时不重试坏域名，直接换下一个。
+    Future<({HttpClientResponse response, String finalUrl})> attempt(
+      String url,
+    ) async {
+      try {
+        return await _open(
+          url,
+          headers: headers,
+          method: method,
+          client: client,
+        );
+      } catch (_) {
+        if (trackCooldown) rethrow;
+        await Future<void>.delayed(const Duration(milliseconds: 120));
+        return _open(url, headers: headers, method: method);
+      }
+    }
+
+    void discard(
+      ({HttpClientResponse response, String finalUrl})? opened,
+    ) {
+      if (opened == null) return;
+      unawaited(opened.response.drain<void>().catchError((Object _) {}));
+    }
+
+    for (final candidate in candidates) {
+      try {
+        final opened = await attempt(candidate);
+        final contentType = _responseHeader(
+          opened.response,
+          HttpHeaders.contentTypeHeader,
+        ).toLowerCase();
+        if (opened.response.statusCode >= 400 ||
+            (method != 'HEAD' &&
+                contentType.isNotEmpty &&
+                !contentType.startsWith('image/'))) {
+          // 错误响应先留着（最后仍失败则透传给调用方），继续尝试下一个图床。
+          // 404 只代表这张图不存在，不把整个图床打进冷却。
+          if (trackCooldown && opened.response.statusCode != 404) {
+            _tmdbImageCooldown[candidate] = DateTime.now().add(
+              const Duration(minutes: 10),
+            );
+          }
+          discard(lastResponse);
+          lastResponse = opened;
+          continue;
+        }
+        _tmdbImageCooldown.remove(candidate);
+        discard(lastResponse);
+        return opened;
+      } catch (e) {
+        if (trackCooldown) {
+          _tmdbImageCooldown[candidate] = DateTime.now().add(
+            const Duration(minutes: 10),
+          );
+        }
+        lastError = e;
+      }
+    }
+    if (lastResponse != null) return lastResponse;
+    throw lastError ?? StateError('图片下载失败');
   }
 
   String _imgCacheKey(String target, String referer) =>
@@ -1435,6 +1547,9 @@ class LocalRelay {
     final name = (q['name'] ?? '').trim();
     final onlyFileId =
         shareId.isEmpty && fileToken.isEmpty && fileId.isNotEmpty;
+    // 壳把分享文件的 fs_id 塞进 fileId、shareId 留空时（fileToken 可能仍有值），
+    // fs_id 属于分享者，直接查 filemetas 只会得到 errno=0；同样要先问 JVM 上下文。
+    final sharedFileId = shareId.isEmpty && fileId.isNotEmpty;
     final tokens = _driveTokens();
     final baiduLike =
         provider.startsWith('baidu') ||
@@ -1451,7 +1566,8 @@ class LocalRelay {
         provider.startsWith('uc') ||
         provider.contains('优汐') ||
         text.startsWith('uc@') ||
-        text.contains('drive.uc.cn');
+        text.contains('drive.uc.cn') ||
+        looksLikeUcCompound(text);
     if (text.isEmpty) {
       return _text(res, 400, 'do=pan 缺少分享地址/描述符');
     }
@@ -1462,7 +1578,7 @@ class LocalRelay {
     //   宿主代理提供 `do=winbox-baidu-context&fileId=`：从壳内存里的
     //   shareFsIdMap / bdclndMap / ukMap 还原 share_id / uk / seKey。
     //   拿到后拼成百度描述符，走只读分享取链（不查本人盘、不转存）。
-    if (onlyFileId && baiduLike && jvmPort > 0 && jvmPort != _port) {
+    if (sharedFileId && baiduLike && jvmPort > 0 && jvmPort != _port) {
       final ctx = await _baiduShareContext(jvmPort, fileId);
       if (ctx != null) {
         final descriptor = _baiduContextDescriptor(ctx, name: name);
@@ -1491,13 +1607,30 @@ class LocalRelay {
           cookie: (tokens['baidu'] ?? '').trim(),
           episodeName: name,
         );
-      } else if (quarkLike) {
+      } else if (quarkLike && !looksLikeUcCompound(text)) {
         link = await resolveQuarkDirect(
           text,
           cookie: (tokens['quark'] ?? '').trim(),
           flag: (q['flag'] ?? provider).trim(),
           episodeName: name,
         );
+        // 壳经常把 UC 分享标成「夸克无限」，参数却是 UC 的分享 id。
+        // 夸克通道失败后用同一组参数改走 UC 再试一次（未绑定 UC 时立即返回）。
+        if (!link.ok || link.url.isEmpty) {
+          final ucText = _ucTextFromPan(q, text);
+          if (ucText.isNotEmpty) {
+            final ucLink = await resolveUcDirect(
+              ucText,
+              cookie: (tokens['uc'] ?? '').trim(),
+              flag: (q['flag'] ?? provider).trim(),
+              episodeName: name,
+            );
+            if (ucLink.ok && ucLink.url.isNotEmpty) {
+              AppLog.i('relay', 'do=pan 夸克参数按 UC 重试成功');
+              link = ucLink;
+            }
+          }
+        }
       } else if (ucLike) {
         link = await resolveUcDirect(
           text,
@@ -1620,12 +1753,15 @@ class LocalRelay {
     ]) {
       final value = (q[key] ?? '').trim();
       if (value.isEmpty) continue;
+      final compound = looksLikeUcCompound(value);
       if (value.startsWith('baidu@') ||
           value.startsWith('uc@') ||
           value.startsWith('quark@') ||
+          compound ||
           RegExp(r'^https?://', caseSensitive: false).hasMatch(value)) {
         final pwd = (q['pwd'] ?? q['code'] ?? '').trim();
-        if (pwd.isNotEmpty && !value.contains('pwd=')) {
+        // 复合串带固定段序，追加 `?pwd=` 会让正则失配。
+        if (pwd.isNotEmpty && !compound && !value.contains('pwd=')) {
           final sep = value.contains('?') ? '&' : '?';
           return '$value${sep}pwd=$pwd';
         }
@@ -1673,6 +1809,24 @@ class LocalRelay {
     final desc = (q['desc'] ?? q['name'] ?? '').trim();
     if (desc.contains('__')) return desc;
     return '';
+  }
+
+  /// 夸克参数实际是 UC 分享时，拼出 UC 描述符供二次解析。
+  ///
+  /// 壳的「夸克无限」线路经常直接下发 UC 的 `shareId/fileId/fileToken`；
+  /// 只有拿到可识别的 UC 文本才重试，避免对真正的夸克失败多做一次网络请求。
+  String _ucTextFromPan(Map<String, String> q, String text) {
+    if (text.startsWith('uc@') || looksLikeUcCompound(text)) return text;
+    final shareId = (q['shareId'] ?? q['share_id'] ?? q['surl'] ?? '').trim();
+    if (shareId.isEmpty) return '';
+    return _panDescriptorText(
+      'uc',
+      shareId: shareId,
+      fileId: (q['fileId'] ?? q['file_id'] ?? q['fsid'] ?? '').trim(),
+      fileToken: (q['fileToken'] ?? q['token'] ?? '').trim(),
+      passcode: (q['pwd'] ?? q['code'] ?? '').trim(),
+      name: (q['name'] ?? '').trim(),
+    );
   }
 
   /// 把 `do=pan` 的 shareId / fileId / fileToken 拼成网盘描述符。
@@ -1834,10 +1988,13 @@ class LocalRelay {
     required Map<String, String> headers,
     required String method,
     String? range,
+    HttpClient? client,
   }) async {
-    final client = _client ??= HttpClient()
-      ..connectionTimeout = const Duration(seconds: 15)
-      ..autoUncompress = false;
+    final primaryClient =
+        client ??
+        (_client ??= HttpClient()
+          ..connectionTimeout = const Duration(seconds: 15)
+          ..autoUncompress = false);
 
     Future<({HttpClientResponse response, String finalUrl})> send(
       HttpClient targetClient,
@@ -1850,7 +2007,7 @@ class LocalRelay {
     );
 
     try {
-      return await send(client);
+      return await send(primaryClient);
     } on HandshakeException catch (e) {
       // 视频 CDN 常见「证书链缺中间证书 / 自签」：浏览器播放器通常放行，
       // Dart 的严格校验会直接拒绝。仅对无副作用的 GET/HEAD 用兼容客户端重试一次。

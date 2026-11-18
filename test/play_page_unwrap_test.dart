@@ -28,6 +28,27 @@ void main() {
         PlayPageUnwrap.needsUnwrap('http://127.0.0.1:9978/proxy?do=live'),
         isFalse,
       );
+      // 网盘 CDN 直链没有扩展名，但绝不能按播放页抓取（会拉整集文件并超时）。
+      expect(
+        PlayPageUnwrap.needsUnwrap(
+          'https://dl-pc-zb.drive.quark.cn/sLBEEPqR/2360212341/'
+          '380bdd8455104bdfbc1a049e9d84a07d6afd082a/'
+          '6afd082a26e80e6f47c642358e8c849bd8bc6c6f?auth_key=1',
+        ),
+        isFalse,
+      );
+      expect(
+        PlayPageUnwrap.needsUnwrap(
+          'https://drive.uc.cn/s/0123456789abcdef0123456789abcdef',
+        ),
+        isFalse,
+      );
+      expect(
+        PlayPageUnwrap.needsUnwrap(
+          'https://d.pcs.baidu.com/file/abc123?fid=1&sign=1',
+        ),
+        isFalse,
+      );
     });
 
     test('提取 const vid 的绝对直链', () {

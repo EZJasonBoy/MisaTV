@@ -90,6 +90,16 @@ class _ImmersiveShellState extends State<ImmersiveShell> {
     super.dispose();
   }
 
+  /// 退出沉浸观影：先还原窗口，再切换布局，避免 Windows 残留全屏。
+  Future<void> _exitImmersive() async {
+    await exitImmersiveFullscreen();
+    if (!mounted) return;
+    final app = AppScope.of(context);
+    await app.setPlayerSettings(
+      app.playerSettings.copyWith(immersiveMode: false),
+    );
+  }
+
   /// 返回键在根页面：有二级页面时已经由全局 Navigator pop，
   /// 这里负责从其它 Tab 退回首页；在首页再按一次退出沉浸模式。
   void _onBackRequest() {
@@ -105,12 +115,7 @@ class _ImmersiveShellState extends State<ImmersiveShell> {
     final last = _lastRootBackAt;
     if (last != null && now.difference(last) < const Duration(seconds: 2)) {
       _lastRootBackAt = null;
-      final app = AppScope.of(context);
-      unawaited(
-        app.setPlayerSettings(
-          app.playerSettings.copyWith(immersiveMode: false),
-        ),
-      );
+      unawaited(_exitImmersive());
       return;
     }
     _lastRootBackAt = now;
@@ -215,7 +220,11 @@ class _ImmersiveShellState extends State<ImmersiveShell> {
     if (app.pendingSearchSeq != _handledSearchSeq) {
       _handledSearchSeq = app.pendingSearchSeq;
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _select(1);
+        if (!mounted) return;
+        // 沉浸详情页压在上面时，搜索结果虽然已经在后台返回，
+        // 但用户仍停在详情页；先回到根路由再切到搜索 Tab。
+        appNavigatorKey.currentState?.popUntil((route) => route.isFirst);
+        _select(1);
       });
     }
 
@@ -293,11 +302,7 @@ class _ImmersiveShellState extends State<ImmersiveShell> {
                                 metrics: ImmersiveMetrics.of(context),
                                 tabNodes: _tabNodes,
                                 onSelect: _select,
-                                onExit: () => app.setPlayerSettings(
-                                  app.playerSettings.copyWith(
-                                    immersiveMode: false,
-                                  ),
-                                ),
+                                onExit: () => unawaited(_exitImmersive()),
                               ),
                             ),
                           ),

@@ -1070,6 +1070,9 @@ class SettingsPageState extends State<SettingsPage> {
                           ),
                           value: app.playerSettings.immersiveMode,
                           onChanged: (value) async {
+                            // 先显式还原窗口，再切回普通布局；只依赖外壳
+                            // dispose 时退出全屏，Windows 上会偶发残留全屏。
+                            if (!value) await exitImmersiveFullscreen();
                             await app.setPlayerSettings(
                               app.playerSettings.copyWith(immersiveMode: value),
                             );
@@ -1168,10 +1171,11 @@ class SettingsPageState extends State<SettingsPage> {
                           ),
                         _ActionRow(
                           icon: Icons.image_outlined,
-                          title: '横图封面来源',
-                          subtitle:
-                              '${_artworkSourceLabel(app.playerSettings.artworkPriority)}'
-                              '${_tmdbCredentialLabel(app.playerSettings.tmdbApiKey, app.playerSettings.tmdbReadToken)}',
+                          title: 'TMDB 封面',
+                          subtitle: _tmdbCredentialLabel(
+                            app.playerSettings.tmdbApiKey,
+                            app.playerSettings.tmdbReadToken,
+                          ),
                           onTap: () => _openArtworkSettings(context, app),
                         ),
                       ],

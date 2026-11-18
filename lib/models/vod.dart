@@ -124,6 +124,7 @@ class VodDetail {
     this.remarks = '',
     this.flags = const [],
     this.episodes = const {},
+    this.folders = const [],
     this.sourceKey = '',
   });
 
@@ -139,6 +140,9 @@ class VodDetail {
   final String remarks;
   final List<String> flags;
   final Map<String, List<Episode>> episodes;
+
+  /// detailContent 返回的 `vod_tag=folder` 子目录；网盘型加固源常见。
+  final List<VodItem> folders;
   final String sourceKey;
 
   List<Episode> episodeList(String flag) {
@@ -166,6 +170,7 @@ class VodDetail {
       for (final entry in episodes.entries)
         entry.key: entry.value.map((e) => e.toJson()).toList(),
     },
+    'folders': folders.map((e) => e.toJson()).toList(),
     'sourceKey': sourceKey,
   };
 
@@ -199,6 +204,10 @@ class VodDetail {
           item.toString(),
       ],
       episodes: episodes,
+      folders: [
+        for (final item in (json['folders'] is List ? json['folders'] as List : const []))
+          if (item is Map) VodItem.fromJson(Map<String, dynamic>.from(item)),
+      ],
       sourceKey: (json['sourceKey'] ?? '').toString(),
     );
   }
