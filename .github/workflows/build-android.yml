@@ -7,13 +7,8 @@ on:
         description: 'Restore optional assets/jvm/shell-real/*.jar from the SHELL_REAL_JARS_B64 secret (otherwise only jars committed to the repo are used)'
         type: boolean
         default: false
-  push:
-    branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'windows/**'
-      - 'web/**'
+  # 不在 push 时自动构建：Android 侧改动不频繁，而每次 push 到 main 都跑一遍
+  # 会白烧 Actions 分钟数。需要产物时手动触发，或用发布事件（发 Release 时自动出包）。
   release:
     types: [published]
 
