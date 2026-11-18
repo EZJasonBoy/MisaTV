@@ -33,6 +33,7 @@ import 'services/source_service.dart';
 import 'services/support_dir_migration.dart';
 import 'services/torrent/torrent_play.dart';
 import 'state/app_state.dart';
+import 'services/subtitle/subtitle_package_store.dart';
 
 void main(List<String> args) {
   runZonedGuarded(() => _bootstrap(args), (error, stack) {
@@ -96,6 +97,9 @@ Future<void> _bootstrap(List<String> args) async {
     supportPath = await enablePortableAppData();
     supportPath ??= (await getApplicationSupportDirectory()).path;
     await migrateLegacySupportDir(supportPath);
+    // 字幕包缓存落盘目录：解过的 RAR/ZIP 记下来，重启后同一个字幕包
+    // 不用重新下载（一次 100KB~1MB，来回重下很浪费）。
+    configurePackageStore(supportPath);
   }
   await AppLog.init(supportDir: supportPath);
   FlutterError.onError = (details) {

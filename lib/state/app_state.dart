@@ -337,6 +337,56 @@ class AppState extends ChangeNotifier {
   /// 跳过片头片尾记录（键 `资源|集`；本集无记录时沿用资源最近一次设置）。
   Map<String, SkipRecord> skipSegments = {};
 
+  /// 上次选过的在线字幕（键 `资源|集` → `{p: providerId, i: id, n: 包内名}`）。
+  ///
+  /// 同一部片子再播时，命中就自动载入上次那条字幕，不用重搜、不用重下。
+  Map<String, Map<String, String>> subtitleChoices = {};
+
+  /// 取本集记录的上次选择（无则 null）。
+  Map<String, String>? subtitleChoiceFor(String resource, String episode) {
+    final exact = subtitleChoices['$resource|$episode'];
+    if (exact != null && exact.isNotEmpty) return exact;
+    // 没有本集记录时沿用同资源最近一次（连续看剧时不必每集重选）。
+    for (final e in subtitleChoices.entries) {
+      if (e.key.startsWith('$resource|') && e.value.isNotEmpty) return e.value;
+    }
+    return null;
+  }
+
+  /// 记住本集用了哪条字幕。
+  Future<void> saveSubtitleChoice({
+    required String resource,
+    required String episode,
+    required String providerId,
+    required String id,
+    required String name,
+  }) async {
+    subtitleChoices['$resource|$episode'] = {
+      'p': providerId,
+      'i': id,
+      'n': name,
+    };
+    // 每资源最多留 40 集，避免无限增长。
+    if (subtitleChoices.length > 200) {
+      final keys = subtitleChoices.keys.take(subtitleChoices.length - 200);
+      for (final k in keys.toList()) {
+        subtitleChoices.remove(k);
+      }
+    }
+    await store.saveSubtitleChoices(subtitleChoices);
+    notifyListeners();
+  }
+
+  /// 清掉本集的字幕记忆（用户点「关闭字幕」时）。
+  Future<void> clearSubtitleChoice({
+    required String resource,
+    required String episode,
+  }) async {
+    subtitleChoices.remove('$resource|$episode');
+    await store.saveSubtitleChoices(subtitleChoices);
+    notifyListeners();
+  }
+
   /// 源健康度落盘防抖：一轮搜索会连续触发几十次成功/失败回调。
   Timer? _sourceHealthSaveTimer;
 
@@ -892,6 +942,7 @@ class AppState extends ChangeNotifier {
     proxy = ProxyConfig.fromJsonString(store.proxyJson);
     await _applyEffectiveProxy();
     skipSegments = store.loadSkipSegments();
+    subtitleChoices = store.loadSubtitleChoices();
     driveAccounts = store.loadDriveAccounts();
     if (!playerWindow) xunleiCloudService.load();
     davService.load();
@@ -995,6 +1046,7 @@ class AppState extends ChangeNotifier {
     sourceService.js.setWorkerCount(playerSettings.jsWorkerPool ? 3 : 1);
     sourceService.jar.setKeepHostsWarm(playerSettings.keepSpiderHosts);
     skipSegments = store.loadSkipSegments();
+    subtitleChoices = store.loadSubtitleChoices();
     driveAccounts = store.loadDriveAccounts();
     _syncDriveTokens();
     assrtToken = store.assrtToken;
