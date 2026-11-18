@@ -1,10 +1,12 @@
 name: build
 
 on:
+  # main 也纳入：此前只监听 mod，导致合并到 main 的改动完全没有 CI 兜底
+  # （曾有 20 个编译错误的提交差点直接进 main）。
   push:
-    branches: [mod]
+    branches: [mod, main]
   pull_request:
-    branches: [mod]
+    branches: [mod, main]
   workflow_dispatch:
 
 concurrency:
