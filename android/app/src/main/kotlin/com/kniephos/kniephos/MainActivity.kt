@@ -1,11 +1,16 @@
 package com.kniephos.kniephos
 
+import android.content.ContentValues
+import android.os.Build
+import android.os.Environment
 import android.os.Looper
+import android.provider.MediaStore
 import android.util.Log
 import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import java.io.File
 
 class MainActivity : FlutterActivity() {
     companion object {
@@ -37,6 +42,32 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private fun exportLogFileToDownloads(srcPath: String, displayName: String): String {
+        val src = File(srcPath)
+        if (!src.exists() || !src.isFile) {
+            throw IllegalArgumentException("日志文件不存在：$srcPath")
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val values = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, displayName)
+                put(MediaStore.Downloads.MIME_TYPE, "text/plain")
+                put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/MisaTV")
+            }
+            val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                ?: throw IllegalStateException("无法创建下载目录文件")
+            contentResolver.openOutputStream(uri)?.use { out ->
+                src.inputStream().use { input -> input.copyTo(out) }
+            } ?: throw IllegalStateException("无法写入目标文件")
+            return "Download/MisaTV/$displayName"
+        } else {
+            val dir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: filesDir
+            val outDir = File(dir, "MisaTV").apply { mkdirs() }
+            val dst = File(outDir, displayName)
+            src.copyTo(dst, overwrite = true)
+            return dst.absolutePath
+        }
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         installSpiderThreadCrashGuard()
         // wex / *Guard 加固壳的 Init.init(Application) 必须拿到真实的 Application。
@@ -51,18 +82,29 @@ class MainActivity : FlutterActivity() {
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, SLEEP_CHANNEL)
             .setMethodCallHandler { call, result ->
-                if (call.method == "setKeepScreenOn") {
-                    val enabled = (call.arguments as? Boolean) ?: false
-                    runOnUiThread {
-                        if (enabled) {
-                            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                        } else {
-                            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                when (call.method) {
+                    "setKeepScreenOn" -> {
+                        val enabled = (call.arguments as? Boolean) ?: false
+                        runOnUiThread {
+                            if (enabled) {
+                                window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                            } else {
+                                window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                            }
+                        }
+                        result.success(null)
+                    }
+                    "exportLogFile" -> {
+                        val path = call.argument<String>("path") ?: ""
+                        val name = call.argument<String>("name") ?: "misatv.log"
+                        try {
+                            val saved = exportLogFileToDownloads(path, name)
+                            result.success(saved)
+                        } catch (t: Throwable) {
+                            result.error("EXPORT_FAILED", t.message ?: t.toString(), null)
                         }
                     }
-                    result.success(null)
-                } else {
-                    result.notImplemented()
+                    else -> result.notImplemented()
                 }
             }
     }
