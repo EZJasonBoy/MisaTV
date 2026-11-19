@@ -36,7 +36,9 @@ class SpiderEnv {
     // 115 属于同一族的「网盘直连」，文件名为约定俗成的 `.115cookie`；
     // 不认识它的 jar 只会忽略这个文件，不会因此报错。
     '115': '.115cookie',
-  };
+    'thunder': '.xunleitoken',
+      'guangya': '.guangyatoken',
+    };
 
   /// wex SharedPreferences 键：provider → `Wex_*` 键名。
   static const _wexPrefKeys = <String, String>{
@@ -44,7 +46,9 @@ class SpiderEnv {
     'uc': 'Wex_ucpan_cookie',
     'baidu': 'Wex_baidu_cookie',
     '115': 'Wex_115_cookie',
-  };
+    'thunder': 'Wex_xunlei_token',
+      'guangya': 'Wex_guangya_token',
+    };
 
   static const _wexPrefsName = 'NewWexFnw_preferences';
 
@@ -55,6 +59,8 @@ class SpiderEnv {
   static const _siteCookieFiles = <String, String>{
     'bili': 'bili_cookie.txt',
     '115': '115.txt',
+    'thunder': 'xunlei_token.txt',
+    'guangya': 'guangya_token.txt',
   };
 
 
@@ -237,16 +243,28 @@ class SpiderEnv {
       obj.remove('baiduCookie');
       obj.remove('115Cookie');
       obj.remove('biliCookie');
+      obj.remove('xunleiToken');
+      obj.remove('xunleiCookie');
+      obj.remove('thunderCookie');
+      obj.remove('guangyaToken');
+      obj.remove('guangyaCookie');
       final quark = cookies['quark'] ?? '';
       final uc = cookies['uc'] ?? '';
       final baidu = cookies['baidu'] ?? '';
       final pan115 = cookies['115'] ?? '';
       final bili = cookies['bili'] ?? '';
+      final thunder = cookies['thunder'] ?? '';
+      final guangya = cookies['guangya'] ?? '';
       if (quark.isNotEmpty) obj['quarkCookie'] = quark;
-      if (uc.isNotEmpty) obj['ucCookie'] = uc;
+      if (uc.isNotEmpty) obj['ucCookie']       = uc;
       if (baidu.isNotEmpty) obj['baiduCookie'] = baidu;
       if (pan115.isNotEmpty) obj['115Cookie'] = pan115;
       if (bili.isNotEmpty) obj['biliCookie'] = bili;
+      if (thunder.isNotEmpty) obj['xunleiToken'] = thunder;
+      if (thunder.isNotEmpty) obj['xunleiCookie'] = thunder;
+      if (thunder.isNotEmpty) obj['thunderCookie'] = thunder;
+      if (guangya.isNotEmpty) obj['guangyaToken'] = guangya;
+      if (guangya.isNotEmpty) obj['guangyaCookie'] = guangya;
       try {
         file.parent.createSync(recursive: true);
         file.writeAsStringSync(jsonEncode(obj), flush: true);
