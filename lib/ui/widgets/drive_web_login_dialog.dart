@@ -8,6 +8,8 @@ import '../../app.dart';
 import '../../core/logging/app_log.dart';
 import '../../services/drive/baidu_session.dart';
 import '../../services/drive/quark_session.dart';
+import '../../services/drive/bili_session.dart';
+import '../../services/drive/pan115_session.dart';
 import '../../services/drive/uc_session.dart';
 import 'drive_cookie_dialog.dart';
 import 'uc_tv_login_dialog.dart';
@@ -133,6 +135,32 @@ const _webLoginConfigs = <String, _WebLoginConfig>{
       '.pass-footer',
       '.app-download',
     ],
+  ),
+  '115': _WebLoginConfig(
+  provider: '115',
+  name: '115网盘',
+  loginUrl: 'https://115.com/',
+    scope: 'https:/115.com',
+    cookieScopes: [
+      'https:/115.com',
+      'https:/webapi.115.com',
+      'https:/proapi.115.com',
+    ],
+    authCookies: ['UID', 'CID', 'SEID', 'KID'],
+    readyCookies: ['UID', 'CID', 'SEID'],
+  ),
+  'bili': _WebLoginConfig(
+    provider: 'bili',
+    name: '哔哩哔哩',
+    loginUrl: 'https:/passport.bilibili.com/login',
+    scope: 'https:/www.bilibili.com',
+    cookieScopes: [
+      'https:/www.bilibili.com',
+      'https:/passport.bilibili.com',
+      'https:/api.bilibili.com',
+    ],
+    authCookies: ['SESSDATA', 'bili_jct', 'DedeUserID'],
+    readyCookies: ['SESSDATA', 'DedeUserID'],
   ),
 };
 
@@ -377,7 +405,9 @@ class _DriveWebLoginDialogState extends State<_DriveWebLoginDialog> {
       // 用 `/member`（百度 `/api/gettemplatevariable`）探测真实登录态。
       if ((_config.provider == 'quark' ||
               _config.provider == 'uc' ||
-              _config.provider == 'baidu') &&
+              _config.provider == 'baidu' ||
+            _config.provider == '115' ||
+            _config.provider == 'bili') &&
           cookie != _lastValidatedCookie &&
           now - _lastValidateAt >= 3000) {
         _lastValidatedCookie = cookie;
@@ -385,7 +415,9 @@ class _DriveWebLoginDialogState extends State<_DriveWebLoginDialog> {
         final session = switch (_config.provider) {
           'quark' => await refreshQuarkSession(cookie),
           'uc' => await refreshUcSession(cookie),
-          _ => await refreshBaiduSession(cookie),
+          '115' => await refreshPan115Session(cookie),
+          'bili' => await refreshBiliSession(cookie),
+            _ => await refreshBaiduSession(cookie),
         };
         if (!mounted) return;
         _lastValidatedOk = session.valid;
@@ -412,7 +444,9 @@ class _DriveWebLoginDialogState extends State<_DriveWebLoginDialog> {
       }
       if (_config.provider == 'quark' ||
           _config.provider == 'uc' ||
-          _config.provider == 'baidu') {
+          _config.provider == 'baidu' ||
+         _config.provider == '115' ||
+        _config.provider == 'bili') {
         // Cookie 刚变化但还没到下一次校验时间：继续等，绝不能先保存访客 Cookie。
         if (cookie != _lastValidatedCookie) return;
         if (_lastValidatedOk == false) {
