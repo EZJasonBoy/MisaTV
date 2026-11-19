@@ -64,6 +64,11 @@ class LocalStore {
   static const kMovieQuotes = 'kniephos.movieQuotes';
   static const kEulaAccepted = 'kniephos.eulaAccepted';
   static const kSkipSegments = 'kniephos.skipSegments';
+
+  /// 上次给某个「资源|集」用过哪条在线字幕（记 providerId / id / 包内文件名）。
+  ///
+  /// 目的：同一部片子第二次播放时自动载入上次选的那条字幕，不用再搜一遍。
+  static const kSubtitleChoice = 'kniephos.subtitleChoice';
   static const kDavServers = 'kniephos.davServers';
   static const kProxy = 'kniephos.proxy';
   static const kWindowSize = 'kniephos.windowSize';
@@ -549,6 +554,33 @@ class LocalStore {
         kSkipSegments,
         jsonEncode(records.map((key, value) => MapEntry(key, value.toJson()))),
       );
+
+  /// 上次选过的在线字幕：`资源|集` → `{p: providerId, i: id, n: 包内文件名}`。
+  ///
+  /// 只记「选了哪一条」，字幕正文仍在 `subtitles/cache/<provider>_<id>.json`，
+  /// 所以重复播放时是「读盘 + 挂载」，零网络。
+  Map<String, Map<String, String>> loadSubtitleChoices() {
+    final raw = _prefs.getString(kSubtitleChoice);
+    if (raw == null || raw.isEmpty) return {};
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return {};
+      final out = <String, Map<String, String>>{};
+      decoded.forEach((k, v) {
+        if (v is Map) {
+          out['$k'] = {
+            for (final e in v.entries) '${e.key}': '${e.value ?? ''}',
+          };
+        }
+      });
+      return out;
+    } catch (_) {
+      return {};
+    }
+  }
+
+  Future<void> saveSubtitleChoices(Map<String, Map<String, String>> choices) =>
+      _prefs.setString(kSubtitleChoice, jsonEncode(choices));
 
   /// WebDAV 服务器（只读直连；密码经 CredentialVault 加密后落盘）。
   List<DavServer> loadDavServers() {

@@ -806,6 +806,11 @@ class _PlayerPageState extends State<PlayerPage>
       }
       _startSaveTimer();
       _showControls();
+      // ★ 上次这集用过哪条在线字幕，就自动挂上（"记忆"）。
+      //
+      //   只在本地缓存命中时生效 —— 不联网、不阻塞起播。用户想换一条
+      //   仍可点字幕按钮手动选（面板里会显示「已缓存 N 条」）。
+      if (!live) unawaited(_autoRestoreSubtitle());
       if (_danmakuEnabled && !live) unawaited(_loadDanmaku());
       return true;
     } catch (e) {

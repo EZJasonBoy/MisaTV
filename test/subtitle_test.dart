@@ -244,14 +244,17 @@ void main() {
       expect(epOf('Show.第03集.mkv'), '3');
     });
 
-    test('rar/7z/bz2 明确不支持并给中文原因', () {
+    // 2026-11-16：RAR / 7Z / BZ2 现在通过 koni_archive 异步解包，
+    // 同步入口仍会抛（提示改用 async 版）—— 保留这条是为了钉住
+    // 「同步 API 不会静默返回空数组」这个契约。
+    test('rar/7z/bz2 走异步，同步入口明确提示', () {
       final rar = <int>[0x52, 0x61, 0x72, 0x21, 0, 0];
       expect(
         () => extractArchiveEntries(rar),
         throwsA(isA<SubtitleException>().having(
           (e) => e.message,
           'message',
-          contains('暂不支持解压 RAR'),
+          contains('需要异步解包'),
         )),
       );
       final sevenZip = <int>[
