@@ -531,58 +531,145 @@ class SpiderHostPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
 
     private fun handleProxy(sock: java.net.Socket) {
         try {
-            sock.soTimeout = 30000
-            val reader = sock.getInputStream().bufferedReader()
-            val requestLine = reader.readLine() ?: return
-            val parts = requestLine.split(" ")
-            if (parts.size < 2) { sock.close(); return }
-            val uri = java.net.URI.create("http://localhost" + parts[1])
-            val params = LinkedHashMap<String, String>()
-            uri.query?.split("&")?.forEach { pair ->
-                val eq = pair.indexOf('=')
-                if (eq > 0) params[decode(pair.substring(0, eq))] = decode(pair.substring(eq + 1))
-            }
-            val out = invokeProxy(params)
-            val body = out.second ?: byteArrayOf()
-            val headers = buildString {
-                append("HTTP/1.1 ${out.first}\r\n")
-                append("Content-Length: ${body.size}\r\n")
-                append("Access-Control-Allow-Origin: *\r\n")
-                append("Connection: close\r\n\r\n")
-            }
-            sock.getOutputStream().write(headers.toByteArray())
-            sock.getOutputStream().write(body)
-            sock.getOutputStream().flush()
-        } catch (_: Throwable) {
-            try { sock.close() } catch (_: Throwable) {}
-        } finally {
-            try { sock.close() } catch (_: Throwable) {}
+      sock.soTimeout = 30000
+val reader = sock.getInputStream().bufferedReader()
+val requestLine = reader.readLine() ?: return
+val parts = requestLine.split(" ")
+if (parts.size < 2) { sock.close(); return }
+val uri = java.net.URI.create("http://localhost" + parts[1])
+val params = LinkedHashMap<String, String>()
+uri.query?.split("&")?.forEach { pair ->
+    val eq = pair.indexOf('=')
+    if (eq > 0) params[decode(pair.substring(0, eq))] = decode(pair.substring(eq + 1))
+}
+while (true) {
+    val line = reader.readLine() ?: break
+    if (line.isEmpty()) break
+    val colon = line.indexOf(':')
+    if (colon > 0) {
+        val key = line.substring(0, colon).trim().lowercase()
+        val value = line.substring(colon + 1).trim()
+        if (key.isNotEmpty() && !params.containsKey(key)) {
+            params[key] = value
+        }
+    }
+}
+val out = invokeProxy(params)
+val hasContentTypeHeader = out.headers.keys.any { it.equals("Content-Type", ignoreCase = true) }
+val hasContentLengthHeader = out.headers.keys.any { it.equals("Content-Length", ignoreCase = true) }
+val hasCorsHeader = out.headers.keys.any { it.equals("Access-Control-Allow-Origin", ignoreCase = true) }
+val headers = buildString {
+    append("HTTP/1.1 ${out.status} ${httpStatusPhrase(out.status)}\r\n")
+    if (!hasContentTypeHeader && out.contentType != null) {
+        append("Content-Type: ${out.contentType}\r\n")
+    }
+    out.headers.forEach { (k, v) ->
+        if (!k.equals("Connection", ignoreCase = true) && !k.equals("Transfer-Encoding", ignoreCase = true)) {
+            append("$k: $v\r\n")
+        }
+    }
+    if (!hasContentLengthHeader && out.bodyBytes != null) {
+        append("Content-Length: ${out.bodyBytes.size}\r\n")
+    }
+    if (!hasCorsHeader) {
+        append("Access-Control-Allow-Origin: *\r\n")
+    }
+    append("Connection: close\r\n\r\n")
+}
+val os = sock.getOutputStream()
+os.write(headers.toByteArray())
+if (out.bodyStream != null) {
+    out.bodyStream.use { stream ->
+        val buf = ByteArray(8192)
+        while (true) {
+            val n = stream.read(buf)
+            if (n < 0) break
+            if (n > 0) os.write(buf, 0, n)
+        }
+    }
+} else if (out.bodyBytes != null && out.bodyBytes.isNotEmpty()) {
+    os.write(out.bodyBytes)
+}
+os.flush()
+} catch (_: Throwable) {
+try { sock.close() } catch (_: Throwable) {}
+} finally {
+try { sock.close() } catch (_: Throwable) {}
         }
     }
 
     /** 调用蜘蛛的 proxy(Map)，把 Object[]{status, contentType, InputStream} 转成 HTTP 响应。 */
-    private fun invokeProxy(params: Map<String, String>): Pair<Int, ByteArray> {
-        val holder = lastClassName?.let { spiders[it] }
-            ?: return 500 to "spider not loaded".toByteArray()
-        val sp = holder.instance
-        val clazz = holder.clazz
-        // 显式标注类型，避免 try/catch 表达式被推断成公共超类型 Serializable。
-        val result: Pair<Int, ByteArray> = try {
-            val ret = clazz.getMethod("proxy", Map::class.java).invoke(sp, params)
-            val arr = ret as? Array<*> ?: return 500 to "bad proxy return".toByteArray()
-            val status = (arr.getOrNull(0) as? Number)?.toInt() ?: 200
-            val bytes = when (val body = arr.getOrNull(2)) {
-                is ByteArray -> body
-                is String -> body.toByteArray()
-                is InputStream -> readStream(body)
-                else -> byteArrayOf()
-            }
-            status to bytes
-        } catch (t: Throwable) {
-            500 to (rootCause(t).message?.toByteArray() ?: byteArrayOf())
+private class ProxyResponse(
+    val status: Int,
+    val contentType: String?,
+    val bodyBytes: ByteArray?,
+    val bodyStream: InputStream?,
+    val headers: Map<String, String>
+)
+
+private fun httpStatusPhrase(code: Int): String = when (code) {
+    200 -> "OK"
+    201 -> "Created"
+    204 -> "No Content"
+    206 -> "Partial Content"
+    301 -> "Moved Permanently"
+    302 -> "Found"
+    303 -> "See Other"
+    304 -> "Not Modified"
+    307 -> "Temporary Redirect"
+    308 -> "Permanent Redirect"
+    400 -> "Bad Request"
+    401 -> "Unauthorized"
+    403 -> "Forbidden"
+    404 -> "Not Found"
+    416 -> "Range Not Satisfiable"
+    500 -> "Internal Server Error"
+    502 -> "Bad Gateway"
+    503 -> "Service Unavailable"
+    else -> "OK"
+}
+
+private fun invokeProxy(params: Map<String, String>): ProxyResponse {
+    val holder = lastClassName?.let { spiders[it] }
+        ?: return ProxyResponse(500, "text/plain; charset=utf-8", "spider not loaded".toByteArray(), null, emptyMap())
+    val sp = holder.instance
+    val clazz = holder.clazz
+    return try {
+        var ret = try {
+            clazz.getMethod("proxy", Map::class.java).invoke(sp, params)
+        } catch (_: NoSuchMethodException) {
+            null
         }
-        return result
+        if (ret == null) {
+            ret = try {
+                clazz.getMethod("proxyLocal", Map::class.java).invoke(sp, params)
+            } catch (_: NoSuchMethodException) {
+                null
+            }
+        }
+        val arr = ret as? Array<*>
+            ?: return ProxyResponse(500, "text/plain; charset=utf-8", "bad proxy return".toByteArray(), null, emptyMap())
+        val status = (arr.getOrNull(0) as? Number)?.toInt() ?: 200
+        val contentType = (arr.getOrNull(1) as? String)?.takeIf { it.isNotBlank() }
+        val headers = LinkedHashMap<String, String>()
+        val rawHeaders = arr.getOrNull(3) as? Map<*, *>
+        rawHeaders?.forEach { (k, v) ->
+            val key = k?.toString()?.trim()
+            val value = v?.toString()?.trim()
+            if (!key.isNullOrEmpty() && value != null) {
+                headers[key] = value
+            }
+        }
+        when (val body = arr.getOrNull(2)) {
+            is InputStream -> ProxyResponse(status, contentType, null, body, headers)
+            is ByteArray -> ProxyResponse(status, contentType, body, null, headers)
+            is String -> ProxyResponse(status, contentType, body.toByteArray(), null, headers)
+            else -> ProxyResponse(status, contentType, ByteArray(0), null, headers)
+        }
+    } catch (t: Throwable) {
+        ProxyResponse(500, "text/plain; charset=utf-8", (rootCause(t).message ?: "").toByteArray(), null, emptyMap())
     }
+}
 
     // ------------------------------------------------------------------
     // 加固壳初始化
