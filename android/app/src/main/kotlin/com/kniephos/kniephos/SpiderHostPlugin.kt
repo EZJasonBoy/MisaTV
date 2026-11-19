@@ -242,6 +242,7 @@ class SpiderHostPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         val fileNames = mapOf(
             "quark" to ".quarkcookie",
             "uc" to ".ucpancookie",
+            "baidu" to ".baiducookie",
             "115" to ".115cookie",
         )
         val roots = mutableSetOf<File>()
