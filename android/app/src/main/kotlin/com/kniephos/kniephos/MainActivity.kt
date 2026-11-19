@@ -1,5 +1,7 @@
 package com.kniephos.kniephos
 
+import android.os.Looper
+import android.util.Log
 import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -8,9 +10,35 @@ import io.flutter.plugin.common.MethodChannel
 class MainActivity : FlutterActivity() {
     companion object {
         private const val SLEEP_CHANNEL = "com.kniephos.kniephos/sleep_inhibitor"
+        @Volatile
+        private var spiderGuardInstalled = false
+    }
+
+    private fun installSpiderThreadCrashGuard() {
+        if (spiderGuardInstalled) return
+        spiderGuardInstalled = true
+        val prev = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            val isMain = thread == Looper.getMainLooper().thread
+            val isSpiderThread = !isMain && (
+                thread.contextClassLoader?.javaClass?.name?.contains("SpiderDexClassLoader") == true ||
+                throwable.stackTrace.any { frame ->
+                    val cls = frame.className
+                    cls.startsWith("com.github.catvod.") ||
+                        cls.contains("SpiderDexClassLoader") ||
+                        cls.contains("SpiderHostPlugin")
+                }
+            )
+            if (isSpiderThread) {
+                Log.e("MisaTV", "Intercepted uncaught spider thread crash on ${thread.name}", throwable)
+            } else {
+                prev?.uncaughtException(thread, throwable)
+            }
+        }
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+        installSpiderThreadCrashGuard()
         // wex / *Guard 加固壳的 Init.init(Application) 必须拿到真实的 Application。
         // FlutterPluginBinding.applicationContext 在部分机型上是 ContextImpl 而不是
         // Application，插件里再怎么剥 ContextWrapper 都取不到，所以这里从 Activity
