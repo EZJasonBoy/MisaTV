@@ -99,7 +99,20 @@ jobs:
             echo "flutter_inappwebview_android build.gradle not found, skip"
           fi
 
+      - name: Decode Android release keystore
+        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          echo "$ANDROID_KEYSTORE_BASE64" | tr -d '\r\n ' | base64 --decode > "${{ runner.temp }}/release.jks"
+          ls -lh "${{ runner.temp }}/release.jks"
+
       - name: Build release APK
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/release.jks
+          ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: flutter build apk --release --target-platform android-arm64
 
       # 校验随包资源确实进了 APK，并生成清单方便核对。
