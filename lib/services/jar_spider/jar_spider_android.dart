@@ -497,6 +497,8 @@ class JarSpiderAndroidService extends JarSpiderService {
     if (flag.contains('百度') || lower.contains('baidu')) return 'baidu';
     if (lower.contains('115')) return '115';
     if (flag.contains('哔哩') || lower.contains('bili')) return 'bili';
+    if (flag.contains('迅雷') || lower.contains('xunlei') || lower.contains('thunder')) return 'thunder';
+    if (flag.contains('光鸭') || flag.contains('光雅') || lower.contains('guangya')) return 'guangya';
     return null;
   }
 
