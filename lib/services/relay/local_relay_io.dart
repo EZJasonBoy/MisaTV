@@ -1860,10 +1860,25 @@ class LocalRelay {
       AppLog.w('relay', '转发取流 JVM 失败：$e');
       return false;
     }
-    if (!acceptErrorStatus && upstream.statusCode >= 400) {
-      await upstream.drain<void>().catchError((Object _) {});
-      AppLog.w('relay', '取流 JVM 未能处理该路由（HTTP ${upstream.statusCode}）');
-      return false;
+    if (!acceptErrorStatus) {
+      final ct = (upstream.headers.value(HttpHeaders.contentTypeHeader) ?? '')
+          .toLowerCase();
+      final isNonMediaText =
+          (ct.contains('text/html') ||
+              ct.contains('application/json') ||
+              ct.contains('text/plain')) &&
+          !ct.contains('mpegurl') &&
+          !ct.contains('m3u8');
+      if (upstream.statusCode >= 400 ||
+          (request.method != 'HEAD' && upstream.contentLength == 0) ||
+          isNonMediaText) {
+        await upstream.drain<void>().catchError((Object _) {});
+        AppLog.w(
+          'relay',
+          '取流 JVM 返回无效媒体响应（HTTP ${upstream.statusCode}, ct=$ct, len=${upstream.contentLength}）',
+        );
+        return false;
+      }
     }
     res.statusCode = upstream.statusCode;
     _copyHeader(upstream, res, HttpHeaders.contentTypeHeader);
