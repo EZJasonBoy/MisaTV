@@ -234,10 +234,19 @@ class SpiderEnv {
       // 凭据键必须完全由当前绑定状态决定：解绑后不能留着旧 Cookie。
       obj.remove('quarkCookie');
       obj.remove('ucCookie');
+      obj.remove('baiduCookie');
+      obj.remove('115Cookie');
+      obj.remove('biliCookie');
       final quark = cookies['quark'] ?? '';
       final uc = cookies['uc'] ?? '';
+      final baidu = cookies['baidu'] ?? '';
+      final pan115 = cookies['115'] ?? '';
+      final bili = cookies['bili'] ?? '';
       if (quark.isNotEmpty) obj['quarkCookie'] = quark;
       if (uc.isNotEmpty) obj['ucCookie'] = uc;
+      if (baidu.isNotEmpty) obj['baiduCookie'] = baidu;
+      if (pan115.isNotEmpty) obj['115Cookie'] = pan115;
+      if (bili.isNotEmpty) obj['biliCookie'] = bili;
       try {
         file.parent.createSync(recursive: true);
         file.writeAsStringSync(jsonEncode(obj), flush: true);
