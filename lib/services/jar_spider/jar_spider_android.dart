@@ -384,7 +384,7 @@ class JarSpiderAndroidService extends JarSpiderService {
     if (text.trim().isEmpty) return null;
     final body = MovieParser.parseJson(text);
     final detail = MovieParser.toDetail(body.movie, site.key);
-    if (detail == null || detail.playSources.isEmpty) {
+    if (detail == null || detail.episodes.isEmpty) {
       final preview = text.length > 300 ? text.substring(0, 300) : text;
       AppLog.i('jar', 'detailContent 空剧集 site=${site.key} len=${text.length} raw=$preview');
     }
