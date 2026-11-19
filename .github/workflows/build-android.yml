@@ -100,13 +100,16 @@ jobs:
           fi
 
       - name: Decode Android release keystore
-        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: |
-          echo "$ANDROID_KEYSTORE_BASE64" | tr -d '\r\n ' | base64 --decode > "${{ runner.temp }}/release.jks"
-          ls -lh "${{ runner.temp }}/release.jks"
-
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "$ANDROID_KEYSTORE_BASE64" | tr -d '\r\n ' | base64 --decode > "${{ runner.temp }}/release.jks"
+            ls -lh "${{ runner.temp }}/release.jks"
+          else
+            echo "ANDROID_KEYSTORE_BASE64 not set, falling back to debug signing"
+          fi
+          
       - name: Build release APK
         env:
           ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/release.jks
