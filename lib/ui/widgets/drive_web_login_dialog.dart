@@ -47,6 +47,7 @@ class _WebLoginConfig {
     this.loginSelectors = const [],
     this.hideSelectors = const [],
     this.extraCss = '',
+    this.useLocalStorageToken = false,
   });
 
   final String provider;
@@ -78,6 +79,7 @@ class _WebLoginConfig {
 
   /// 额外的兜底样式。
   final String extraCss;
+  final bool useLocalStorageToken;
 }
 
 const _webLoginConfigs = <String, _WebLoginConfig>{
@@ -161,6 +163,34 @@ const _webLoginConfigs = <String, _WebLoginConfig>{
     ],
     authCookies: ['SESSDATA', 'bili_jct', 'DedeUserID'],
     readyCookies: ['SESSDATA', 'DedeUserID'],
+  ),
+  'thunder': _WebLoginConfig(
+    provider: 'thunder',
+    name: '迅雷云盘',
+    loginUrl: 'https://pan.xunlei.com/',
+    scope: 'https://pan.xunlei.com',
+    cookieScopes: [
+      'https://pan.xunlei.com',
+      'https://xunlei.com',
+      'https://xluser-ssl.xunlei.com',
+    ],
+    authCookies: ['sessionid', 'userid', 'loginday'],
+    readyCookies: [],
+    useLocalStorageToken: true,
+  ),
+  'guangya': _WebLoginConfig(
+    provider: 'guangya',
+    name: '光鸭云盘',
+    loginUrl: 'https://www.guangyapan.com/',
+    scope: 'https://www.guangyapan.com',
+    cookieScopes: [
+      'https://www.guangyapan.com',
+      'https://app.guangyapan.com',
+      'https://api.guangyapan.com',
+    ],
+    authCookies: ['token', 'access_token', 'refresh_token'],
+    readyCookies: [],
+    useLocalStorageToken: true,
   ),
 };
 
@@ -384,6 +414,76 @@ class _DriveWebLoginDialogState extends State<_DriveWebLoginDialog> {
     if (_polling || _finished || _expired) return;
     _polling = true;
     try {
+      if (_config.useLocalStorageToken && _controller != null) {
+        final lsRaw = await _controller!.evaluateJavascript(
+          source: '''
+            (function() {
+              try {
+                var out = [];
+                for (var i = 0; i < localStorage.length; i++) {
+                  var k = localStorage.key(i);
+                  if (!k) continue;
+                  if (k.indexOf('credentials_') === 0 || k === 'token' || k === 'auth_token') {
+                    var v = localStorage.getItem(k);
+                    if (v) out.push(v);
+                  }
+                }
+                return JSON.stringify(out);
+              } catch (e) {
+                return '[]';
+              }
+            })();
+          ''',
+        );
+        if (lsRaw is String && lsRaw.isNotEmpty) {
+          String? token;
+          try {
+            final items = jsonDecode(lsRaw);
+            if (items is List) {
+              String? fallbackAccess;
+              String? fallbackPlain;
+              for (final item in items) {
+                final raw = item?.toString().trim() ?? '';
+                if (raw.isEmpty) continue;
+                try {
+                  final parsed = jsonDecode(raw);
+                  if (parsed is Map) {
+                    final rt = (parsed['refresh_token'] ?? parsed['refreshToken'])
+                        ?.toString()
+                        .trim();
+                    if (rt != null && rt.length >= 10) {
+                      token = rt;
+                      break;
+                    }
+                    final at = (parsed['access_token'] ?? parsed['accessToken'])
+                        ?.toString()
+                        .trim();
+                    if (fallbackAccess == null && at != null && at.length >= 10) {
+                      fallbackAccess = at;
+                    }
+                    continue;
+                  }
+                } catch (_) {}
+                if (fallbackPlain == null && raw.length >= 10) {
+                  fallbackPlain = raw;
+                }
+              }
+              token ??= fallbackAccess ?? fallbackPlain;
+            }
+          } catch (_) {}
+          if (token != null && token.isNotEmpty) {
+            _finished = true;
+            _timer?.cancel();
+            _timeoutTimer?.cancel();
+            if (!mounted) return;
+            final app = AppScope.of(context);
+            await app.saveDriveAccount(_config.provider, token);
+            if (!mounted) return;
+            Navigator.of(context).pop(true);
+            return;
+          }
+        }
+      }
       final cookies = await _readCookies();
       if (!_isLoggedIn(cookies)) {
         _loginSeenAt = 0;
