@@ -1044,6 +1044,8 @@ class JarSpiderService {
     if (flag.contains('百度') || lower.contains('baidu')) return 'baidu';
     if (_looksLikeBiliFlag(flag)) return 'bili';
     if (RegExp(r'(^|[^0-9])115([^0-9]|$)').hasMatch(flag)) return '115';
+    if (flag.contains('迅雷') || lower.contains('xunlei') || lower.contains('thunder')) return 'thunder';
+    if (flag.contains('光鸭') || flag.contains('光雅') || lower.contains('guangya')) return 'guangya';
     return null;
   }
 
