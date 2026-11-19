@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -7,7 +6,9 @@ import 'package:flutter/services.dart' show rootBundle;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import '../../core/logging/app_log.dart';
 import '../../core/net/download_mirrors.dart';
+import '../../core/net/runtime_fetch.dart';
 import '../../core/platform/archive_extract.dart';
 
 class PyRuntimeProgress {
@@ -171,8 +172,8 @@ class PyRuntime {
     final dir = await _dir();
     final pythonExe = File(p.join(dir.path, 'python.exe'));
     dir.createSync(recursive: true);
-    final http = HttpClient();
-    http.connectionTimeout = const Duration(seconds: 20);
+    final http = RuntimeFetch.newClient();
+    AppLog.i('py', '开始安装 Python 运行时 $version → ${dir.path}');
     try {
       if (!pythonExe.existsSync()) {
         await _installEmbed(dir, http);
@@ -185,8 +186,12 @@ class PyRuntime {
       if (!await installed()) {
         throw StateError('Python 运行时安装不完整（缺少 python.exe / requests）');
       }
+      AppLog.i('py', 'Python 运行时安装完成');
       _setProgress('Python 运行时已就绪', 1);
       return dir;
+    } catch (e, s) {
+      AppLog.e('py', 'Python 运行时安装失败', e, s);
+      rethrow;
     } finally {
       http.close(force: true);
       Future<void>.delayed(const Duration(seconds: 4), () {
@@ -212,6 +217,7 @@ class PyRuntime {
           url,
           tmp,
           (v) => _setProgress('下载 Python 运行时（约 11 MB）…', v * 0.55),
+          minBytes: 1024 * 1024,
         );
         final size = tmp.lengthSync();
         if (size < 1024 * 1024) throw StateError('下载内容过小（$size 字节）');
@@ -262,15 +268,34 @@ class PyRuntime {
         if (marker.existsSync() && _wheelInstalled(sitePackages, wheel)) {
           continue;
         }
+        // 进度按「这一包的字节」走，下 4 MB 的 lxml 时百分比在动，
+        // 用户能看出是在下载而不是卡死。包内 0.3 的区间留给依赖安装。
+        final base = 0.65 + 0.3 * (index - 1) / _wheels.length;
+        final span = 0.3 / _wheels.length;
+        void report(String name, int received, int? total) {
+          final ratio = (total != null && total > 0)
+              ? (received / total).clamp(0.0, 1.0)
+              : 0.0;
+          final kb = (received / 1024).toStringAsFixed(0);
+          final label = total != null && total > 0
+              ? '$kb/${(total / 1024).toStringAsFixed(0)} KB'
+              : '$kb KB';
+          _setProgress(
+            '安装依赖 ${wheel.project}（$index/${_wheels.length} · $label）…',
+            base + span * ratio,
+          );
+        }
+
         _setProgress(
           '安装依赖 ${wheel.project}（$index/${_wheels.length}）…',
-          0.65 + 0.3 * index / _wheels.length,
+          base,
         );
         try {
           final url = await _resolveWheel(http, wheel, bases);
           if (url == null) throw StateError('镜像中未找到匹配的 wheel');
           final file = File(p.join(temp.path, '${wheel.project}.whl'));
-          await _download(http, url, file, null);
+          AppLog.i('py', '取件 ${wheel.project} → $url');
+          await _download(http, url, file, null, onBytes: report);
           try {
             if (wheel.version.isNotEmpty) {
               // 锁定版本时先清掉同名旧版本（例如 pywasm 2.x 的残留文件）。
@@ -290,9 +315,20 @@ class PyRuntime {
         } catch (e) {
           if (wheel.required) rethrow;
           // 可选依赖失败不影响纯 Python 源
+          AppLog.w('py', '可选依赖 ${wheel.project} 未安装', e);
         }
       }
+      // 标记只在这一轮所有必需依赖都确实落地后写：中途失败（用户关窗口、断网）
+      // 不会留下「已装完」的假象，下次进来会继续补装而不是全部跳过。
+      final missing = _wheels
+          .where((w) => w.required && !_wheelInstalled(sitePackages, w))
+          .map((w) => w.project)
+          .toList();
+      if (missing.isNotEmpty) {
+        throw StateError('必需依赖缺失：${missing.join(', ')}');
+      }
       marker.writeAsStringSync(DateTime.now().toIso8601String());
+      AppLog.i('py', '依赖库安装完成（${_wheels.length} 个）');
     } finally {
       try {
         if (temp.existsSync()) temp.deleteSync(recursive: true);
@@ -302,15 +338,18 @@ class PyRuntime {
     }
   }
 
-  /// 锁版本的 wheel 用标记文件判断（同名目录可能是其它版本）。
+  /// 判断某个 wheel 是否已装好。
+  ///
+  /// 锁版本的包必须「标记文件 + 实际内容」都在才算装上：只认标记会让解压到一半
+  /// 被中断的目录看起来是完整的，之后每次启动都跳过它，蜘蛛一 import 就崩。
+  /// 同理，标记文件本身也不能当作「整批装完」的证据——见 _installWheels 末尾。
   bool _wheelInstalled(Directory sitePackages, _WheelSpec wheel) {
-    if (wheel.version.isNotEmpty) {
-      return File(_wheelMarker(sitePackages, wheel)).existsSync();
-    }
-    // 单文件模块（如 typing_extensions.py）装出来不是目录，
-    // 只查目录会让它每次启动都被判为缺失、重复联网安装。
     final base = p.join(sitePackages.path, wheel.importName);
-    return Directory(base).existsSync() || File('$base.py').existsSync();
+    final present =
+        Directory(base).existsSync() || File('$base.py').existsSync();
+    if (!present) return false;
+    if (wheel.version.isEmpty) return true;
+    return File(_wheelMarker(sitePackages, wheel)).existsSync();
   }
 
   String _wheelMarker(Directory sitePackages, _WheelSpec wheel) => p.join(
@@ -324,16 +363,16 @@ class PyRuntime {
     List<String> bases,
   ) async {
     for (final base in bases) {
+      final uri = Uri.parse('$base${wheel.project}/');
+      // 带超时取索引页：镜像排队时不能让整个安装在第一步就无限期挂着。
+      final html = await RuntimeFetch.text(
+        http,
+        uri,
+        tag: 'py',
+        userAgent: 'kniephos/0.1',
+      );
+      if (html == null) continue;
       try {
-        final uri = Uri.parse('$base${wheel.project}/');
-        final req = await http.getUrl(uri);
-        req.headers.set('User-Agent', 'kniephos/0.1');
-        final res = await req.close();
-        if (res.statusCode != 200) {
-          await res.drain<void>();
-          continue;
-        }
-        final html = await utf8.decoder.bind(res).join();
         final hrefs = RegExp(r'href="([^"]+\.whl[^"]*)"')
             .allMatches(html)
             .map((m) => m.group(1)!.replaceAll('&amp;', '&'))
@@ -363,8 +402,12 @@ class PyRuntime {
           final pick = (stable.isNotEmpty ? stable : candidates).last;
           return uri.resolve(pick).toString();
         }
-      } catch (_) {
-        // 尝试下一个镜像
+        AppLog.w(
+          'py',
+          '${wheel.project}：索引里没有匹配 ${wheel.tags.join(" / ")} 的 wheel',
+        );
+      } catch (e) {
+        AppLog.w('py', '${wheel.project}：解析索引失败 $base', e);
       }
     }
     return null;
@@ -439,34 +482,33 @@ class PyRuntime {
         .toList();
   }
 
+  /// 下载单个文件。
+  ///
+  /// 超时、重试、日志都在 [RuntimeFetch] 里统一处理——这里只做进度换算。
+  /// [onBytes] 给需要按字节显示百分比的调用方（wheel 列表用），
+  /// [onProgress] 给只要 0~1 的调用方（embed 包用）。
   Future<void> _download(
     HttpClient http,
     String url,
     File target,
-    ValueChanged<double>? onProgress,
-  ) async {
-    final req = await http.getUrl(Uri.parse(url));
-    req.headers.set('User-Agent', 'kniephos/0.1');
-    final res = await req.close();
-    if (res.statusCode != 200) {
-      await res.drain<void>();
-      throw StateError('HTTP ${res.statusCode}：$url');
-    }
-    final total = res.contentLength;
-    target.parent.createSync(recursive: true);
-    final sink = target.openWrite();
-    var received = 0;
-    try {
-      await for (final chunk in res) {
-        sink.add(chunk);
-        received += chunk.length;
-        if (onProgress != null && total > 0) {
+    ValueChanged<double>? onProgress, {
+    int minBytes = 1,
+    void Function(String url, int received, int? total)? onBytes,
+  }) async {
+    await RuntimeFetch.file(
+      http,
+      Uri.parse(url),
+      target,
+      tag: 'py',
+      userAgent: 'kniephos/0.1',
+      minBytes: minBytes,
+      onProgress: (received, total) {
+        if (onProgress != null && total != null && total > 0) {
           onProgress((received / total).clamp(0, 1));
         }
-      }
-    } finally {
-      await sink.close();
-    }
+        onBytes?.call(url, received, total);
+      },
+    );
   }
 
   void _setProgress(String message, double value) {

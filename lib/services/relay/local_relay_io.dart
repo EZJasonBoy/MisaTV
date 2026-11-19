@@ -18,6 +18,8 @@ import '../drive/uc_native.dart';
 import '../spider_debug/spider_debug_service.dart';
 import '../torrent/bt_stream.dart';
 import 'm3u8_purify.dart';
+import 'play_seek_probe.dart';
+import 'play_speed_meter.dart';
 import 'relay_access.dart';
 import 'relay_origin.dart';
 import 'stream_cache_io.dart';
@@ -114,6 +116,230 @@ class LocalRelay {
   int _playTargetSeq = 0;
   static const _playTargetMax = 4000;
   static const _playUrlInlineMax = 3500;
+
+  /// 正在进行的 `/play` 转发会话：`sessionId -> (地址, 取消回调)`。
+  ///
+  /// 为什么需要它（2026-11-18 13:21 实测）：
+  ///
+  ///   播放器切换剧集时只是**换了一个 URL**，并不会主动通知中继。于是旧那一集
+  ///   的 `res.addStream(upstream)` 还在继续跑 —— 中继仍在向上游拉数据、往那条
+  ///   已经没有读者的响应里写。日志里看得很清楚：
+  ///
+  ///   13:21:42  开始打开 82.2GB 奥德赛
+  ///   13:21:46  /play Range bytes=27373135298-   Ent9tGSS（复仇者联盟，旧片）
+  ///   13:21:50  /play Range ...                    Ent9tGSS
+  ///   13:21:54  /play Range ...                    Ent9tGSS
+  ///   13:21:58  /play Range ...                    Ent9tGSS
+  ///
+  ///   后果是**同一个 CDN 连接池被多个片分掉**：同一位置单独跑 32MB 分片实测
+  ///   12.27 MB/s（连测 20 片），而实际播放时只有 4.47 MB/s —— 82.2GB 那条码率
+  ///   5.90 MB/s，立刻掉进「播一会儿卡一下」。
+  ///
+  ///   修法：每个转发会话登记进来，播放器切集 / 关闭时调 [releasePlaySessions]
+  ///   主动取消旧会话的订阅并关闭上游连接。
+  final Map<int, _PlaySession> _playSessions = {};
+  int _playSessionSeq = 0;
+
+  /// 已经被释放、但仍可能在发新请求的上游地址 → 过期时刻。
+  ///
+  /// ★ 为什么需要它（2026-11-18 15:13 实测）：
+  ///
+  ///   `_deadControllerPending` 会跳过 `VideoPlayerController.dispose()` 的
+  ///   等待，但 dispose 本身仍挂在 `await _creatingCompleter!.future` 上
+  ///   （原生 `prepare()` 卡在顺序扫 Cues，永不返回）—— 于是原生播放器
+  ///   **永远不会被销毁**，它继续按 32MB 步长发新请求。
+  ///
+  ///   日志里 E03 早就换到 `/chunk` 播了（15:13:00 就绪），而它的直链
+  ///   15:13:02 / 15:13:05 / 15:13:07 / 15:13:08 / 15:13:19 还在被读。
+  ///   每判死一次就多一个僵尸抢带宽 —— 这就是「第一集快、后面越来越慢」。
+  ///
+  ///   原生播放器杀不掉，就在中继入口拒绝它的请求：命中这张表直接回 410，
+  ///   字节数零，不占 CDN 连接。
+  final Map<String, DateTime> _deadPlayTargets = {};
+
+  /// 僵尸标记的有效期。过期后允许再试一次（用户可能真的要点回那一集）。
+  static const Duration _deadTargetTtl = Duration(seconds: 120);
+
+  /// 记录一个「以后不要再服务」的上游地址。
+  void _markDeadPlayTarget(String url) {
+    final key = url.trim();
+    if (key.isEmpty) return;
+    _deadPlayTargets[key] = DateTime.now().add(_deadTargetTtl);
+    // 表不能无限涨：顺手清掉已过期的。
+    final now = DateTime.now();
+    _deadPlayTargets.removeWhere((_, expiry) => expiry.isBefore(now));
+    if (_deadPlayTargets.length > 64) {
+      final oldest = _deadPlayTargets.keys.first;
+      _deadPlayTargets.remove(oldest);
+    }
+  }
+
+  /// 这个地址是否已被判死（且还不到过期）。
+  bool isDeadPlayTarget(String url) {
+    final expiry = _deadPlayTargets[url.trim()];
+    if (expiry == null) return false;
+    if (expiry.isBefore(DateTime.now())) {
+      _deadPlayTargets.remove(url.trim());
+      return false;
+    }
+    return true;
+  }
+
+  /// 解除僵尸标记 —— 用户主动重播同一集时调用。
+  void revivePlayTarget(String url) {
+    final key = url.trim();
+    if (key.isEmpty) return;
+    if (_deadPlayTargets.remove(key) != null) {
+      AppLog.i('relay', '解除僵尸标记，允许重新取流');
+    }
+  }
+
+  /// 当前活跃的 `/play` 转发会话数（诊断用）。
+  int get activePlaySessions => _playSessions.length;
+
+  /// 登记一个 `/play` 转发会话，返回它的 id。
+  int _registerPlaySession(String url, void Function() cancel) {
+    final id = ++_playSessionSeq;
+    _playSessions[id] = _PlaySession(url: url, cancel: cancel);
+    // 会话表不能无限涨：极端情况下旧会话没被显式释放，按注册顺序淘汰。
+    if (_playSessions.length > 32) {
+      final oldest = _playSessions.keys.first;
+      final stale = _playSessions.remove(oldest);
+      try {
+        stale?.cancel();
+      } catch (_) {
+        // 已断开
+      }
+    }
+    return id;
+  }
+
+  void _unregisterPlaySession(int id) => _playSessions.remove(id);
+
+  /// 主动释放正在进行的 `/play` 转发。
+  ///
+  /// [keepUrl] 非空时保留地址与之相同的会话（播放器刚切过去的那条），其余
+  /// 全部取消。返回被取消的会话数。
+  /// 把一条 `/play` 的上游响应体转发给播放器，并登记成可取消的会话。
+  ///
+  /// 三个结束条件，谁先到谁收尾：
+  ///   1. 上游读完（正常结束）→ 注销会话；
+  ///   2. 播放器断开（`res.done` 完成）→ 取消上游订阅、丢掉未读字节；
+  ///   3. 外部调 [releasePlaySessions] → 走同一条取消路径。
+  Future<void> _forwardPlayBody(
+    HttpResponse res,
+    HttpClientResponse upstream,
+    String target,
+  ) async {
+    final completer = Completer<void>();
+    StreamSubscription<List<int>>? sub;
+
+    /// 上游已经读完（正常结束 / 上游报错）。这只表示「没有更多数据」，
+    /// **不代表外部不能再要求取消** —— 两者是独立状态。
+    var finished = false;
+
+    /// 已经执行过取消。防止 `res.done` 与 `releasePlaySessions()` 重复取消。
+    var cancelled = false;
+
+    void completeOnce() {
+      if (!completer.isCompleted) completer.complete();
+    }
+
+    /// 上游正常结束 / 报错收尾。
+    void finish() {
+      if (finished) return;
+      finished = true;
+      completeOnce();
+    }
+
+    /// 立即停止转发并释放上游连接。
+    ///
+    /// ★ 这个函数**不看 [finished]**。原实现 `if (closed) return` 把「上游读完」
+    ///   和「外部要求取消」混成一个标志，导致播放器已经读完当前分片时
+    ///   `releasePlaySessions()` 变成空操作 —— 实测 2026-11-18 14:09：
+    ///   日志写了「释放 1 条旧播放会话」，2 毫秒后那条直链还在发新请求。
+    Future<void> cancelUpstream() async {
+      if (cancelled) return;
+      cancelled = true;
+      try {
+        await sub?.cancel();
+      } catch (_) {
+        // 已断开
+      }
+      // 上游没读完就断开时必须 drain：否则这条连接会带着未读字节回到
+      // keep-alive 池，下次请求写进这条死管道后永远等不到响应。
+      if (!finished) {
+        try {
+          await upstream.drain<void>().timeout(const Duration(seconds: 2));
+        } catch (_) {
+          // 超时 / 已断开都无所谓：HttpClient 会丢弃这条连接
+        }
+      }
+      finished = true;
+      completeOnce();
+    }
+
+    final id = _registerPlaySession(target, () {
+      unawaited(cancelUpstream());
+    });
+
+    // 播放器断开 / 响应关闭时 `res.done` 会完成，据此提前收掉上游，
+    // 不必等整段 32MB 读完。
+    void onPlayerGone() {
+      if (!cancelled) unawaited(cancelUpstream());
+    }
+
+    unawaited(
+      res.done.then((_) => onPlayerGone()).catchError((Object _) {
+        onPlayerGone();
+      }),
+    );
+
+    sub = upstream.listen(
+      (chunk) {
+        if (cancelled) return;
+        PlaySpeedMeter.instance.add(chunk.length);
+        try {
+          res.add(chunk);
+        } catch (_) {
+          // 播放器已断开：res.done 回调会收尾
+        }
+      },
+      onError: (Object _) => finish(),
+      onDone: finish,
+      cancelOnError: true,
+    );
+
+    await completer.future;
+    _unregisterPlaySession(id);
+  }
+
+  int releasePlaySessions({String? keepUrl}) {
+    if (_playSessions.isEmpty) return 0;
+    final keep = keepUrl?.trim() ?? '';
+    final drop = <int>[];
+    for (final entry in _playSessions.entries) {
+      if (keep.isNotEmpty && entry.value.url == keep) continue;
+      drop.add(entry.key);
+    }
+    var cancelled = 0;
+    for (final id in drop) {
+      final session = _playSessions.remove(id);
+      if (session == null) continue;
+      // 记进僵尸表：原生播放器不会因为这次 cancel 就停手，它还会发新请求。
+      _markDeadPlayTarget(session.url);
+      try {
+        session.cancel();
+        cancelled++;
+      } catch (_) {
+        // 连接已断开：忽略
+      }
+    }
+    if (cancelled > 0) {
+      AppLog.i('relay', '释放 $cancelled 条旧播放会话（已标记僵尸，后续请求直接拒）');
+    }
+    return cancelled;
+  }
 
   bool get running => _server != null;
   int get port => _port;
@@ -447,6 +673,14 @@ class LocalRelay {
     if (guardPrivate && RelayAccessPolicy.isPrivateTarget(target)) {
       return _text(res, 403, '禁止访问本机/内网地址');
     }
+    // ★ 僵尸播放器拦截：判死过、已换路的地址不再服务。
+    //
+    //   原生播放器杀不掉（见 _deadPlayTargets 的说明），它会一直发新请求。
+    //   这里直接回 410 —— 一条日志、零字节，不占 CDN 连接，也不污染探针。
+    if (isDeadPlayTarget(target)) {
+      AppLog.i('relay', '/play 拒绝僵尸请求（该地址已换路）${redactUrl(target)}');
+      return _text(res, 410, '该地址已切换到壳内取流');
+    }
     final provider = (query['ck'] ?? '').trim();
     final headers = _headersFromQuery(query, provider);
     // ★ 百度 dlink 的防盗链按 UA 判定：浏览器 UA 恒定 403 31326/user is not authorized
@@ -520,7 +754,13 @@ class LocalRelay {
         res.statusCode = 200;
         res.headers.set(HttpHeaders.contentTypeHeader, cached.contentType);
         res.headers.contentLength = cached.length;
-        await res.addStream(cached.file.openRead());
+        // 命中本地边播缓存：字节同样是从中继发出去的，一起计量。
+        await res.addStream(
+          cached.file.openRead().map((chunk) {
+            PlaySpeedMeter.instance.add(chunk.length);
+            return chunk;
+          }),
+        );
         await res.close();
         return;
       }
@@ -530,14 +770,66 @@ class LocalRelay {
     //   被压到 ~0.1 MB/s，播放器表现为「有画面但极慢」。夹到 32MB 后回到
     //   10~19 MB/s；上游回 206 + 真实 Content-Range，播放器会自然续请求下一段。
     //   只对夸克 / UC / 百度生效，避免影响 WebDAV、B 站等无关线路。
+    //
+    //   ★ 首段（`bytes=0-`）额外夹到 8MB，见 [_firstUpstreamRangeBytes] 的说明。
+    //
+    //   ★ 这个夹取**不能省**：试过让 fvp 直连（ffmpeg 自带 Cookie 直接向 CDN
+    //     取流），`dl-pc-zb` 上的片子立刻黑屏 —— ffmpeg 开场发的正是开放区间
+    //     `bytes=0-`，正好踩中跨度限速。夹成小跨度反而是这几条线路能播的前提。
+    // ★★ 没有 Range 的请求也必须夹。
+    //
+    //   `clampRange(null)` 原样返回 null（它不猜），上游于是按「无 Range」处理：
+    //   **200 + 整个文件**。对网盘 CDN 这就是最差的一档 —— 开放区间下载实测
+    //   0.1 MB/s，一个 5.7GB 的 mkv 要读 16 小时；而且响应里没有 Content-Range，
+    //   播放器连总长都不知道，无法 seek 到文件尾读 Cues/moov → 永远没有首帧。
+    //
+    //   小文件（1.2 / 1.89GB）之所以「能播」，是因为它们整体读得完；
+    //   5.0GB 以上就必然卡死。实测 13:49:44 与 13:51:01 两次点 5.7GB E05
+    //   都停在「开始打开」后再无任何日志（129 秒），正是这条路径。
+    //
+    //   所以网盘线路上没有 Range 时，主动合成首段 `bytes=0-<span-1>`，
+    //   让上游回 206 + Content-Range —— 有总长、能 seek、速度也回到正常档。
+    final clamped = _shouldClampRange(provider, target)
+        ? clampRange(range) ?? 'bytes=0-${_firstUpstreamRangeBytes - 1}'
+        : range;
+    final changed = clamped != range;
+    if (changed) {
+      AppLog.i(
+        'relay',
+        '/play Range ${range ?? '(无)'} → $clamped ${redactUrl(target)}',
+      );
+    }
     final opened = await _openPlayWithSession(
       target,
       headers: headers,
       method: request.method,
-      range: _shouldClampRange(provider, target) ? clampRange(range) : range,
+      range: clamped,
       provider: provider,
     );
     final upstream = opened.response;
+    // ★ 把「播放器到底读了哪里」记进 PlaySeekProbe。
+    //
+    //   病态模式（实测 18:11:53 玩偶「嫁金钗」[6.0GB]E08.mkv，夸克直链）：
+    //   播放器从 0 开始按 32MB 步长纯顺序读，25 秒只走到 209MB / 6422MB，
+    //   期间**没有任何请求落在文件尾部**。mkv 的 Cues 索引在 6.42GB 处，
+    //   读不到索引就没有首帧 —— 只能等 25 秒超时。
+    //   同一部剧的 mp4（1.3GB）第二个请求就是文件尾，968ms 出画面。
+    //   所以「有没有摸过文件尾」可以提前判定要不要换路（改走壳内 /chunk）。
+    _noteSeekProbe(clamped ?? range, upstream, target);
+    // 只在本实例确实改过 Range 时打一行诊断：HLS / DASH 的每个分片都会走
+    // 这个函数，无条件打日志会把整份日志淹掉。
+    if (changed) {
+      final contentRange = _responseHeader(
+        upstream,
+        HttpHeaders.contentRangeHeader,
+      );
+      AppLog.i(
+        'relay',
+        '/play ${upstream.statusCode} '
+            'content-range=${contentRange.isEmpty ? '(无)' : contentRange} '
+            'len=${upstream.contentLength} ${redactUrl(target)}',
+      );
+    }
     // 上游可能下发了刷新后的会话 Cookie；清单里的子地址要用最新 Cookie，
     // 否则后续分片仍带旧值，播一会儿就 401 / 403 断流。
     if (provider.isNotEmpty) {
@@ -664,8 +956,17 @@ class LocalRelay {
             length: upstream.contentLength,
           )
         : null;
+
     if (writer == null) {
-      await upstream.pipe(res);
+      // 没开边播缓存：同样要计量，否则「详情」里的实时速度永远是 0。
+      //
+      // 用「登记会话 + 手动 listen」而不是 `await res.addStream(...)`：
+      //   · addStream 的 Future 只有整段流结束（或抛错）时才完成，期间播放器
+      //     断开没人知道，中继会继续把整片 32MB 从上游拉完；
+      //   · 手动 listen 拿到 StreamSubscription，能被 releasePlaySessions()
+      //     取消 —— 播放器切集时立刻掐掉旧上游，不再和当前这一集抢带宽。
+      await _forwardPlayBody(res, upstream, target);
+      await res.close();
       return;
     }
     try {
@@ -677,6 +978,9 @@ class LocalRelay {
           StreamTransformer<List<int>, List<int>>.fromHandlers(
             handleData: (chunk, sink) {
               writer.add(chunk);
+              // 实时网速就是这里转发的字节量（fvp 的 bitRate 是标称码率，
+              // Remux 源常常是 0）。
+              PlaySpeedMeter.instance.add(chunk.length);
               sink.add(chunk);
             },
           ),
@@ -693,21 +997,35 @@ class LocalRelay {
     }
   }
 
-  /// 单次上游请求的 Range 跨度上限（32MB）。
-  ///
-  /// 实测（夸克 672MB / 2GB 两个直链，同一 cookie、同一节点）：
-  ///   · `bytes=0-`（开放）→ 0.1 MB/s
-  ///   · 跨度 2GB / 1GB / 512MB → 0.1 MB/s
-  ///   · 跨度 400MB / 350MB → 0.1 / 4.6 MB/s（阈值在 ~360MB 附近）
-  ///   · 跨度 300MB / 256MB → 5.4 / 7.8 MB/s
-  ///   · 跨度 128MB / 64MB / 32MB → 9.8 / 9.6 / 13.0 MB/s
-  ///   · 跨度 16MB / 8MB → 8.5 / 19.2 MB/s
-  /// 也就是说速度与请求跨度反相关，开放 Range 是最差的一种。
-  /// 播放器（尤其 fvp / mpv）开场习惯发 `bytes=0-`，正好踩在这个坑上。
-  static const int _maxUpstreamRangeBytes = 32 * 1024 * 1024;
+  /// 记录一次上游 Range 结果到 [PlaySeekProbe]，供播放页判定「是否只顺读」。
+  /// [range] 是本实例实际发给上游的 Range（可能被夹过），[total] 取自
+  /// Content-Range 的 `/总长`；上游回 200（整文件）时 total 记 0，探针不会误判。
+  void _noteSeekProbe(
+    String? range,
+    HttpClientResponse upstream,
+    String target,
+  ) {
+    final contentRange = _responseHeader(
+      upstream,
+      HttpHeaders.contentRangeHeader,
+    );
+    if (contentRange.isEmpty) return;
+    final slash = contentRange.lastIndexOf('/');
+    if (slash < 0) return;
+    final total = int.tryParse(contentRange.substring(slash + 1).trim()) ?? 0;
+    if (total <= 0) return;
+    final m = RegExp(
+      r'bytes\s*=\s*(\d+)\s*-',
+      caseSensitive: false,
+    ).firstMatch(range?.trim() ?? '');
+    final start = m == null ? 0 : (int.tryParse(m.group(1)!) ?? 0);
+    // 不带 URL：探针是「当前这次播放」的会话级记录，中继记的是上游地址、
+    // 播放页拿的是中继地址，用 URL 作 key 会让两边永远对不上（详见
+    // PlaySeekProbe 的类注释）。
+    PlaySeekProbe.instance.noteRange(start: start, total: total);
+  }
 
   /// 该线路是否是会出现「跨度限速」的网盘 CDN。
-  ///
   /// 只对夸克 / UC / 百度夹取：普通 HTTP 直链、WebDAV、B 站 CDN 没有这个
   /// 问题，没必要把一次长请求拆成几十段。provider 缺失时按 host 兜底
   /// （壳的 `do=pan` 有时不带 `site` 参数）。
@@ -726,10 +1044,42 @@ class LocalRelay {
         host.contains('baidu.com');
   }
 
+  /// 单次上游请求的 Range 跨度上限（32MB）。
+  ///
+  /// 实测（夸克 672MB / 2GB 两个直链，同一 cookie、同一节点）：
+  ///   · `bytes=0-`（开放）→ 0.1 MB/s
+  ///   · 跨度 2GB / 1GB / 512MB → 0.1 MB/s
+  ///   · 跨度 400MB / 350MB → 0.1 / 4.6 MB/s（阈值在 ~360MB 附近）
+  ///   · 跨度 300MB / 256MB → 5.4 / 7.8 MB/s
+  ///   · 跨度 128MB / 64MB / 32MB → 9.8 / 9.6 / 13.0 MB/s
+  ///   · 跨度 16MB / 8MB → 8.5 / **19.2** MB/s
+  /// 也就是说速度与请求跨度反相关，开放区间是最差的一种。
+  /// 播放器（尤其 fvp / mpv）开场习惯发 `bytes=0-`，正好踩在这个坑上。
+  static const int _maxUpstreamRangeBytes = 32 * 1024 * 1024;
+
+  /// **首段**请求的跨度：8MB。
+  ///
+  /// ★ 为什么首段不用 32MB（2026-11-17 实测）：
+  ///   玩偶「嫁金钗」的夸克原画 5.0~5.7GB 版本全部卡在 25 秒 initialize 超时，
+  ///   而同片 1.2 / 1.89GB 版本正常。规律是「文件越大越卡」。
+  ///
+  ///   原因在 fvp（libmdk/ffmpeg）读 mkv 的顺序：它要先拿文件头，再 seek 到
+  ///   **文件尾**读 Cues/moov，才可能出首帧。中继把 `bytes=0-` 夹成 32MB 后，
+  ///   播放器得先等满 32MB 才能继续 seek；文件越大、CDN 越慢，这一段就越久。
+  ///   上表的 8MB 一档实测 19.2 MB/s（比 32MB 的 13.0 还快），而且需要等的
+  ///   数据量只有 1/4 —— 首帧时间直接缩短。
+  ///
+  ///   续请求（`bytes=<非零>-`）仍然用 32MB：那时播放器已经在连续拉流，
+  ///   跨度大才有吞吐优势。
+  static const int _firstUpstreamRangeBytes = 8 * 1024 * 1024;
+
   /// 把播放器的 Range 夹到安全跨度；无法解析时原样透传（不猜）。
   ///
   /// 只处理单区间 `bytes=<start>-<end|*>`：多区间（带逗号）与 `-<suffix>` 形态
   /// 直接透传 —— 那些在媒体播放里几乎不出现，改动它们风险大于收益。
+  ///
+  /// `start == 0`（首段，含 `bytes=0-` 与 `bytes=0-<大数>`）用更小的跨度，
+  /// 让播放器尽早拿到第一批数据去做尾部 seek；其余用 [_maxUpstreamRangeBytes]。
   static String? clampRange(String? range) {
     if (range == null || range.trim().isEmpty) return range;
     final m = RegExp(
@@ -739,15 +1089,18 @@ class LocalRelay {
     if (m == null) return range;
     final start = int.tryParse(m.group(1)!);
     if (start == null || start < 0) return range;
+    final span = start == 0
+        ? _firstUpstreamRangeBytes
+        : _maxUpstreamRangeBytes;
     final endText = m.group(2)!.trim();
     if (endText.isEmpty) {
-      // 开放区间：夹成固定跨度
-      return 'bytes=$start-${start + _maxUpstreamRangeBytes - 1}';
+      // 开放区间：夹成固定跨度（首段更小）
+      return 'bytes=$start-${start + span - 1}';
     }
     final end = int.tryParse(endText);
     if (end == null || end < start) return range;
-    if (end - start + 1 <= _maxUpstreamRangeBytes) return range;
-    return 'bytes=$start-${start + _maxUpstreamRangeBytes - 1}';
+    if (end - start + 1 <= span) return range;
+    return 'bytes=$start-${start + span - 1}';
   }
 
   /// 只把音视频 / 图片 / 二进制当作可缓存内容，避免把 HTML 错误页写进缓存。
@@ -2053,7 +2406,7 @@ class LocalRelay {
         req.headers.set(HttpHeaders.rangeHeader, range);
       }
       req.followRedirects = false;
-      final response = await req.close();
+      final response = await _closeWithHeaderTimeout(req, current);
       final code = response.statusCode;
       final location = response.headers.value(HttpHeaders.locationHeader);
       if (code < 300 || code >= 400 || location == null || location.isEmpty) {
@@ -2068,6 +2421,35 @@ class LocalRelay {
       }
     }
     throw HttpException('重定向次数过多：$url');
+  }
+
+  /// 等响应头的上限：`HttpClient.connectionTimeout` **只覆盖 TCP 建连**，
+  /// 不覆盖「连上了但对方不发响应头」这一段。
+  ///
+  /// 实测（本地 ServerSocket 只 accept 不回包）：`connectionTimeout=2s` 时
+  /// `req.close()` 卡满 5 秒才被外部打断 —— 也就是说上游半死不活时
+  /// `/play` 会无限挂起。日志里「开始打开」后 51 秒零输出、连 25 秒的
+  /// initialize 超时都没触发过，就是这个原因。
+  ///
+  /// 取 12 秒：正常 CDN 首字节 < 1s；慢节点偶发 3-5s；超过 12s 基本可以判死。
+  static const _headerTimeout = Duration(seconds: 12);
+
+  /// 关闭请求并等响应头；超时/失败都 abort 掉这条连接，避免句柄泄漏。
+  static Future<HttpClientResponse> _closeWithHeaderTimeout(
+    HttpClientRequest req,
+    Uri current,
+  ) async {
+    try {
+      return await req.close().timeout(_headerTimeout);
+    } on TimeoutException {
+      try {
+        req.abort();
+      } catch (_) {}
+      throw HttpException(
+        '上游 ${_headerTimeout.inSeconds}s 内未返回响应头：${current.host}',
+        uri: current,
+      );
+    }
   }
 
   static bool _isSameOrigin(Uri a, Uri b) =>
@@ -2382,4 +2764,20 @@ class LocalRelay {
     res.add(utf8.encode(message));
     await res.close();
   }
+}
+
+
+
+/// 一条 `/play` 转发会话：记住它的地址与「怎么取消」。
+///
+/// 取消动作由转发那段自己给出（订阅 cancel + 上游连接关闭），这里只负责登记。
+class _PlaySession {
+  const _PlaySession({required this.url, required this.cancel});
+
+  /// 这条会话正在转发的上游地址（用于 [LocalRelay.releasePlaySessions] 判
+  /// 「保留哪个」）。
+  final String url;
+
+  /// 立即停止转发：取消对上游响应体的订阅，并关掉那条 HTTP 连接。
+  final void Function() cancel;
 }

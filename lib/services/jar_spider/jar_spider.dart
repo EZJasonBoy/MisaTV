@@ -117,6 +117,14 @@ bool isJarShimMissMessage(String message) {
 ///     转成普通 jar 并缓存到 `<cache>/payloads/<jarKey>/`；
 ///   · 之后：用 shell-shim（纯 Java 影子 DexNative）直接加载缓存里的真实实现，
 ///     不再启动模拟器，单次调用约 2–3 秒。
+/// 网盘负缓存的 key：网盘商 + 分享描述符前 96 字符。
+///
+/// 抽成顶层函数是为了能单测：它决定「同一集再点时能不能跳过必然失败的原生解链」，
+/// key 一变（比如把截断长度改小）就会出现「第一次 -7、第二次还 -7」的重复白等。
+String driveShareKey(String provider, String id) {
+  final t = id.trim();
+  return '$provider|${t.length > 96 ? t.substring(0, 96) : t}';
+}
 class JarSpiderService {
   JarSpiderService({
     JvmRuntime? runtime,
@@ -153,6 +161,12 @@ class JarSpiderService {
   JarServeHost? _playServeHost;
   String? _playServeKey;
 
+  /// 当前 pin 住的 serve host 是**从浏览池借来的**（预热留下的那只）。
+  ///
+  /// 借来的 host 不能像专用 host 那样在播放结束时关掉：它还是搜索 / 详情页
+  /// 的常驻进程，关掉就等于把预热白做了。所以释放时只解除 pin，不动进程。
+  bool _playServeBorrowed = false;
+
   /// 当前常驻取流 JVM 的宿主代理端口（0 = 没有可用进程）。
   ///
   /// 加固壳返回的 `do=hmys` 等地址依赖该 JVM 内存里的状态；本地中继把
@@ -170,6 +184,35 @@ class JarSpiderService {
   /// 本次会话里确认过「`playerContent` 不会自己解 CDN 挑战」的源。
   /// 之后播同一源直接走专用 serve host，不再先陪跑一次必然失败的 `--hold`。
   final Set<String> _servePlaySites = {};
+
+  /// 本次 `play()` 里「原生免转存取链试过但失败」。
+  ///
+  /// 失败说明分享参数 / 登录态有问题，jar 侧还有机会拿到播放页；此时优先复用
+  /// 浏览池里**已经起好的** serve host，而不是直接 `--hold` 冷启一只 JVM。
+  /// 实测（2026-11-17 12:29 / 12:33）：`-7` 失败后 `--hold` 冷启 8.0 秒，
+  /// `resolve` 合计 9.2 / 10.3 秒；而预热完成的 serve host 取一次只要 1~3 秒。
+  bool _nativeDriveFailed = false;
+
+  /// 连续失败次数：provider → 次数。用于把「系统性解不出来」的网盘整体降级。
+  ///
+  /// 为什么需要它（实测证据）：百度这条线路的分享描述符从 11-14 到 11-17
+  /// 共 20 多次 `errno=-7`，一次都没成功 —— `_resolveShareLink` 内部已经把
+  /// shareId/uk 两种段序都试过，仍回 -7，说明是该壳下发的描述符本身对不上，
+  /// 不是偶发。但每点一集仍要白等 1.3 秒（每次播放的第一段固定耗时）。
+  /// 同一个 provider 连续两次证明解不出，本会话就不再尝试原生解链，
+  /// 直接把 1.3 秒省掉。
+  final Map<String, int> _nativeDriveMisses = {};
+
+  /// 连续失败达到这个次数就整体跳过该 provider 的原生解链。
+  static const _nativeDriveMissLimit = 2;
+
+  /// 已经确定解不出直链的**单份**分享（`provider|分享参数`）。
+  ///
+  /// 百度 `errno=-7`（shareId/uk 段序或 seKey 对不上）在 [resolveBaiduDirect]
+  /// 内部已经把两种段序都试过，同一份描述符再打一次只会再得 -7 —— 而每一次
+  /// 要白等 1.3 秒（实测 17:14:11 → 17:14:24 两次都是 1.3s）。记下来直接跳过，
+  /// 用户重开同一集时省掉这一段。
+  final Set<String> _nativeDriveDead = {};
 
   /// 浏览 / 搜索用常驻进程池：同一份 jar 最多 3 个 host。
   ///
@@ -376,8 +419,18 @@ class JarSpiderService {
     final tokens = driveTokens?.call() ?? const <String, String>{};
     final baiduCookie = (tokens['baidu'] ?? '').trim();
     if (looksLikeBaiduShare(id)) {
+      final banned = (_nativeDriveMisses['baidu'] ?? 0) >= _nativeDriveMissLimit;
       if (baiduCookie.isEmpty) {
         AppLog.w('drive', '百度分享播放但未绑定账号，回退 jar：${shorten(id, 80)}');
+      } else if (banned) {
+        // 本会话已连续证明这个网盘的原生解链解不出来：直接跳过，省掉 1.3 秒。
+        AppLog.i('drive', '百度原生解链本会话已连续失败，直接走 serve host');
+        _nativeDriveFailed = true;
+      } else if (_nativeDriveDead.contains(driveShareKey('baidu', id))) {
+        // 上一次已经确认这份描述符解不出来（-7 / 105 / 116 / 113），
+        // 直接当「原生免转存失败」处理，省掉那 1.3 秒白等。
+        AppLog.i('drive', '百度分享参数已知失效，跳过原生解链 ${shorten(id, 80)}');
+        _nativeDriveFailed = true;
       } else {
         final link = await resolveBaiduDirect(
           id,
@@ -386,9 +439,44 @@ class JarSpiderService {
         );
         if (link.ok) {
           AppLog.i('drive', '百度免转存直链 ${shorten(link.url, 120)}');
+          _nativeDriveMisses.remove('baidu');
           return PlayResult(url: link.url, flag: flag, headers: link.headers);
         }
         AppLog.w('drive', '百度免转存解链失败：${link.reason}');
+        // ★ 记下「已绑定了凭据但原生解链失败」。
+        //
+        //   这个标记决定后面走哪条回退：直接的 `--hold` 要冷启一只 JVM
+        //   （实测 8 秒，日志 12:29/12:33 两次都是「-7 失败 → hold 8.0s →
+        //   resolve 9~10s」），而浏览池里的 serve host 在启动预热时就已经起好了
+        //   （日志「预热完成 玩偶」），复用它取一次 playerContent 通常 1~3 秒。
+        _nativeDriveFailed = true;
+        // ★ 永久失败的分享参数并进负缓存：同一条线路的同一集再点，
+        //   不必再白等这 1.3 秒。
+        //
+        //   实测（2026-11-17 17:14:11 / 17:14:24，玩偶「嫁金钗」）：
+        //     17:14:11.985  -7 失败            ← 这一段恒定 1.3s，每次都白跑
+        //     17:14:11.988  复用池内空闲 host   ← 只隔 3ms
+        //     17:14:14.897  serve host 成功     ← 真正取到链只花 2.9s
+        //   `resolveBaiduDirect` 内部已经把 shareId/uk 两种段序都试过一遍，
+        //   仍回 -7 说明这份描述符本身就是对不上（或 seKey 过期到无法自愈），
+        //   下一次用同一份描述符打过去只会再得 -7。
+        final systematic = link.reason.contains('errno=-7') ||
+            link.reason.contains('errno=105') ||
+            link.reason.contains('errno=116') ||
+            link.reason.contains('errno=113');
+        if (systematic) {
+          _nativeDriveDead.add(driveShareKey('baidu', id));
+          // 累计「系统性问题」次数：连续两次就整体降级，本会话不再试原生解链。
+          // 证据：11-14 到 11-17 这条线路 20 多次尝试全是 -7，一次没成功。
+          _nativeDriveMisses['baidu'] = (_nativeDriveMisses['baidu'] ?? 0) + 1;
+          if (_nativeDriveMisses['baidu']! >= _nativeDriveMissLimit) {
+            AppLog.w(
+              'drive',
+              '百度原生解链连续失败 ${_nativeDriveMisses['baidu']} 次，'
+                  '本会话后续直接走 serve host（省 1.3s/次）',
+            );
+          }
+        }
       }
     }
     final ucCookie = (tokens['uc'] ?? '').trim();
@@ -441,6 +529,7 @@ class JarSpiderService {
     bool retryAuth = true,
   }) async {
     await _releasePlayHost();
+    _nativeDriveFailed = false;
     if (site.api.toLowerCase().contains('hmys')) {
       final hymsUrl = await _hymsNative?.resolve(id);
       if (hymsUrl != null) {
@@ -461,6 +550,32 @@ class JarSpiderService {
     if (_servePlaySites.contains(site.key)) {
       final preferred = await _playViaServe(site, flag, id, vipFlags);
       if (preferred != null) return preferred;
+    }
+    // ★ 原生免转存失败后（已绑定凭据但分享参数 / 登录态不对），优先复用
+    //   **浏览池里已经预热好的** serve host 再试一次。
+    //
+    //   实测（2026-11-17 12:29 / 12:33）原生 `-7` 失败后直接走 `--hold`：
+    //     12:29:10 失败 → 12:29:18 hold 就绪（8.0s）→ resolve 9179ms
+    //     12:33:10 失败 → 12:33:19 hold 就绪（9.0s）→ resolve 10251ms
+    //   而启动预热「预热完成 玩偶」留下的 serve host 一直在，取一次
+    //   playerContent 只要 1~3 秒 —— 用户点百度线路时就是这 8 秒白等。
+    //
+    //   只在这一种情形下插入这条快速路径：它的 `playerContent` 与 `--hold` 走
+    //   同一个 SpiderPool 实例语义，拿到的地址形态一致，属于「可能成功、失败也
+    //   不比原来慢」的重试。
+    if (_nativeDriveFailed) {
+      final warm = await _playViaServe(
+        site,
+        flag,
+        id,
+        vipFlags,
+        reuseWarm: true,
+      );
+      if (warm != null) {
+        AppLog.i('jar', '原生免转存失败后复用预热 serve host 取链成功 ${site.key}');
+        return warm;
+      }
+      AppLog.i('jar', '预热 serve host 也未取到，退回 --hold ${site.key}');
     }
     // 加固壳的取流地址指向**这个 JVM 自己**（壳内多线程取流服务 / 宿主代理），
     // 所以播放必须在「打完结果后不退出」的常驻进程里跑。
@@ -638,12 +753,94 @@ class JarSpiderService {
   /// `homeContent` 有时会命中实例内缓存，不再下发新的 set-cookie。新实例的
   /// `init` 会重新解挑战，`homeContent` 再把 `__cdn_verified` 吸收进实例 Cookie，
   /// 这样 `playerContent` 才能拿到真正的播放页而不是 403 挑战页。
+  ///
+  /// [reuseWarm] 为 true 时**不新起进程**，直接用浏览池里已有的预热 host
+  /// （池 key 不带时间戳后缀）。这是「原生免转存已失败」时的一条快路径：
+  /// 冷启一只 JVM 实测要 8 秒，而复用预热 host 只要 1~3 秒。代价是那只实例的
+  /// `__cdn_verified` 可能已过期 —— 所以取不到时仍然返回 null，让调用方照常
+  /// 退回 `--hold`，总耗时不会比原来更差。
+  /// 直接取一只**已在池里、空闲的** serve host，不发起任何调用。
+  ///
+  /// 为什么不再跑一次 `homeContent`：复预热 host 的目的是拿它的
+  /// `SpiderPool` 实例（里面已经有解过挑战的 Cookie），那只 JVM 是启动预热时
+  /// 建好的。为了拿到它的引用再调一次 `homeContent` 纯属白跑 ——
+  /// 实测（2026-11-17 13:50）两次百度取链里，这一步分别花了 3.6 秒和 5.9 秒：
+  ///
+  /// ```
+  /// 13:50:42.752  -7 失败                       ← 原生解链 1.3s
+  /// 13:50:48.639  播放回退专用 host pid=51208   ← homeContent 白跑 5.9s
+  /// 13:50:51.913  取链成功  resolve=10419ms
+  /// ```
+  ///
+  /// 池 key 形如 `<jarKey>|<payload>.jar[|shim][|<后缀>]`，`jarKey` 是 jar 缓存名。
+  /// 只挑 `inflight == 0` 的：忙的那只派过去要排队，不如没有。
+  JarServeHost? _pickWarmServeHost(String jarKey) {
+    JarServeHost? best;
+    for (final entry in _servePools.entries) {
+      if (!entry.key.startsWith('$jarKey|')) continue;
+      for (final host in entry.value) {
+        if (!host.alive || host.inflight != 0) continue;
+        // 多个候选时优先带宿主代理端口的（壳的 /chunk 依赖它）。
+        if (best == null || (host.proxyPort > 0 && best.proxyPort <= 0)) {
+          best = host;
+        }
+      }
+    }
+    return best;
+  }
+
+  /// 播放初始化超时后的「换路重取」：**跳过原生免转存**，强制走 serve host 的 `/chunk`。
+  ///
+  /// ★ 为什么要这条路径（2026-11-17 17:13:31 实测，玩偶「嫁金钗」[6.0GB]E08.mkv）：
+  ///
+  ///   夸克直链（`dl-pc-zb.drive.quark.cn`）交给 fvp/libmdk 后，它从 0 开始按
+  ///   32MB 步长**纯顺序**读：
+  ///
+  ///   ```
+  ///   17:13:31  开始打开
+  ///   17:13:31  Range bytes=0-            → 0-8388607      206
+  ///   17:13:33  Range bytes=8388608-      → 8388608-41943039
+  ///   17:13:38  Range bytes=41943040-     → …
+  ///   17:13:44 / 17:13:50 / 17:13:56  继续 +32MB
+  ///   17:13:56  打开失败 TimeoutException after 0:00:25
+  ///   ```
+  ///
+  ///   25 秒只走到 142MB / 6422MB，而且**一次也没有请求文件尾部** ——
+  ///   mkv 的 Cues 索引在 6.42GB 处，读不到索引就只能一直顺扫，永远等不到首帧。
+  ///   同一部剧同一码率的「叫金钗 DV」线路走 JVM 的 `/chunk`：
+  ///   `17:14:28 开始 → 17:14:30 就绪 initialize=2298ms`。
+  ///
+  ///   既然同一份数据经 serve host 就能秒开，这条直链超时后最有价值的补救
+  ///   不是「再直连一次」，而是「换 serve host 取链」。所以这里单独开一个
+  ///   入口：不碰 [_resolveNativeDrivePlay]，直接 `playerContent`。
+  Future<PlayResult?> replayViaServe(
+    SourceBean site,
+    String flag,
+    String id, {
+    List<String> vipFlags = const [],
+  }) async {
+    if (!site.isJarSpider) return null;
+    await _releasePlayHost();
+    AppLog.i('jar', '直链播放失败，改用 serve host 重新取链 ${site.key} flag=$flag');
+    // 先复用浏览池里预热的 host（1~3 秒），没有再新起专用 host。
+    final warm = await _playViaServe(
+      site,
+      flag,
+      id,
+      vipFlags,
+      reuseWarm: true,
+    );
+    if (warm != null) return warm;
+    return _playViaServe(site, flag, id, vipFlags);
+  }
+
   Future<PlayResult?> _playViaServe(
     SourceBean site,
     String flag,
     String id,
-    List<String> vipFlags,
-  ) async {
+    List<String> vipFlags, {
+    bool reuseWarm = false,
+  }) async {
     JarServeHost? host;
     String? hostKey;
     void capture(JarServeHost h, String k) {
@@ -652,16 +849,45 @@ class JarSpiderService {
       hostKey = k;
     }
 
-    final suffix = '|play-${DateTime.now().microsecondsSinceEpoch}';
+    if (reuseWarm) {
+      // 先试「直接拿池里的空闲 host」：零调用、零等待。
+      final raw = await _rawJar(site);
+      final jarKey = p.basenameWithoutExtension(raw.path);
+      final warm = _pickWarmServeHost(jarKey);
+      if (warm != null) {
+        AppLog.i(
+          'jar',
+          '复用池内空闲 host pid=${warm.pid} proxy=${warm.proxyPort} '
+              '（跳过 homeContent）',
+        );
+        host = warm;
+        for (final entry in _servePools.entries) {
+          if (entry.value.contains(warm)) {
+            hostKey = entry.key;
+            break;
+          }
+        }
+      }
+    }
+
+    final suffix = reuseWarm
+        ? null
+        : '|play-${DateTime.now().microsecondsSinceEpoch}';
+    var borrowed = false;
     try {
-      await _invokeWithAowuFallback(
-        site,
-        'homeContent',
-        const [],
-        hold: false,
-        servePoolSuffix: suffix,
-        serveHostListener: capture,
-      );
+      // 只有没直接拿到 pool 里的 host 时才靠 homeContent 去建 / 找一只。
+      if (host == null) {
+        await _invokeWithAowuFallback(
+          site,
+          'homeContent',
+          const [],
+          hold: false,
+          servePoolSuffix: suffix,
+          serveHostListener: capture,
+        );
+      } else {
+        borrowed = true;
+      }
       final current = host;
       if (current == null || !current.alive) return null;
       AppLog.i('jar', '播放回退专用 host pid=${current.pid} key=$hostKey');
@@ -672,7 +898,12 @@ class JarSpiderService {
       ]);
       final result = normalizeSpiderPlay(text, flag);
       if (result.url.isNotEmpty) {
-        return _pinServePlayResult(result, host, hostKey);
+        return _pinServePlayResult(
+          result,
+          host,
+          hostKey,
+          borrowed: borrowed,
+        );
       }
       AppLog.w(
         'jar',
@@ -693,15 +924,16 @@ class JarSpiderService {
   PlayResult? _pinServePlayResult(
     PlayResult result,
     JarServeHost? host,
-    String? hostKey,
-  ) {
+    String? hostKey, {
+    bool borrowed = false,
+  }) {
     final local =
         result.url.contains('127.0.0.1') || result.url.contains('localhost');
     if (!local) return result;
     // 没有常驻 host 的本机地址（一次性进程返回的 /chunk、/proxy）必然已失效。
     if (host == null || hostKey == null || !host.alive) return null;
     final url = tuneChunkUrl(rewriteLocalProxy(result.url, host.proxyPort));
-    _keepPlayServeHost(host, hostKey);
+    _keepPlayServeHost(host, hostKey, borrowed: borrowed);
     AppLog.i(
       'jar',
       '播放回退 serve host 成功 pid=${host.pid} proxy=${host.proxyPort} '
@@ -842,8 +1074,7 @@ class JarSpiderService {
   final Set<String> _staleMd5Logged = {};
 
   /// 是否是壳内自带取流服务的本机 `/chunk` 地址。
-  static bool isLocalChunkPlayUrl(String url) {
-    final uri = Uri.tryParse(url.trim());
+  static bool isLocalChunkPlayUrl(String url) {    final uri = Uri.tryParse(url.trim());
     if (uri == null || uri.scheme.toLowerCase() != 'http') return false;
     final host = uri.host.toLowerCase();
     if (host != '127.0.0.1' && host != 'localhost') return false;
@@ -1067,23 +1298,34 @@ class JarSpiderService {
 
   /// 回退到 serve host 取流成功后 pin 住它：壳内取流服务就在这只 JVM 里，
   /// 提前回收会让 `/chunk` 地址立刻失效。
-  void _keepPlayServeHost(JarServeHost host, String key) {
+  ///
+  /// [borrowed] 为 true 表示这只 host 是从**浏览池借来的预热进程**：
+  /// 播放结束时只解除 pin，不杀进程（它还要继续给搜索 / 详情页服务）。
+  void _keepPlayServeHost(JarServeHost host, String key, {bool borrowed = false}) {
     _playServeHost = host;
     _playServeKey = key;
+    _playServeBorrowed = borrowed;
     _playReaper?.cancel();
     _playReaper = Timer(const Duration(hours: 2), () {
       unawaited(_releasePlayHost());
     });
   }
 
-  /// 播放结束：这只专用 host 不会再被复用（pool key 带时间戳），直接关掉，
-  /// 避免连续切集时留下多只 JVM。
+  /// 播放结束：专用 host（pool key 带时间戳）直接关掉，避免连续切集时留下
+  /// 多只 JVM；借来的预热 host 只解除 pin，让它回到浏览池继续待命。
   Future<void> _releasePlayServeHost() async {
     final host = _playServeHost;
     final key = _playServeKey;
+    final borrowed = _playServeBorrowed;
     _playServeHost = null;
     _playServeKey = null;
+    _playServeBorrowed = false;
     if (host == null || key == null) return;
+    if (borrowed) {
+      // 借来的：留在池里，重置空闲计时器交给正常淘汰。
+      if (_servePools.containsKey(key)) _touchServe(key);
+      return;
+    }
     final pool = _servePools[key];
     if (pool != null) {
       pool.remove(host);
@@ -4321,3 +4563,4 @@ class _ProcResult {
   final String stderr;
   final bool timedOut;
 }
+

@@ -128,6 +128,43 @@ class SourceService {
     summarize: (text) => 'chars=${text.length}',
   );
 
+  /// 直链播放初始化超时后的换路重取：跳过原生免转存，直接让 serve host 出 `/chunk`。
+  ///
+  /// 只对 JAR 蜘蛛源有意义（只有它们有 serve host）。夸克直链被 libmdk 顺读时
+  /// 永远等不到 mkv 的 Cues，而同一份数据经壳内 `/chunk` 是秒开 —— 见
+  /// [JarSpiderService.replayViaServe] 的实测记录。
+  Future<PlayResult?> replayViaServe({
+    required SourceBean site,
+    required SiteConfig config,
+    required String flag,
+    required String rawUrl,
+  }) async {
+    if (!site.isJarSpider) return null;
+    final sw = Stopwatch()..start();
+    try {
+      final result = await jar.replayViaServe(
+        site,
+        flag,
+        rawUrl,
+        vipFlags: config.flags,
+      );
+      AppLog.i(
+        'play',
+        '换路重取 site=${site.key} flag=$flag ${sw.elapsedMilliseconds}ms '
+            'url=${redactUrl(result?.url ?? '')} msg=${shorten(result?.message ?? '', 120)}',
+      );
+      return result;
+    } catch (e, s) {
+      AppLog.e(
+        'play',
+        '换路重取失败 site=${site.key} flag=$flag ${sw.elapsedMilliseconds}ms',
+        e,
+        s,
+      );
+      return null;
+    }
+  }
+
   Future<PlayResult> resolvePlay({
     required SourceBean site,
     required SiteConfig config,

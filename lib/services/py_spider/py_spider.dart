@@ -7,7 +7,6 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import '../../core/logging/app_log.dart';
-import '../../core/net/proxy_runtime.dart';
 import '../../core/net/url_utils.dart';
 import '../../core/utils/file_url.dart';
 import '../../models/site_config.dart';
@@ -356,8 +355,9 @@ class PySpiderService {
   }
 
   Map<String, String> _environment() => {
+    // 直连模式：不再注入 ProxyRuntime.pythonEnv（HTTP_PROXY 等一律不设），
+    // Python 蜘蛛直接出网，与 Win-box 行为一致。
     ...Platform.environment,
-    ...ProxyRuntime.instance.pythonEnv,
     'PYTHONIOENCODING': 'utf-8',
     'PYTHONUTF8': '1',
   };
