@@ -240,10 +240,10 @@ class SpiderHostPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         // 通道 2：裸 Cookie 文件。不同壳家族分别用 getFilesDir()/getDir("TV")/
         // spiderCacheDir 作为根，全部写一遍，解绑时删除。
         val fileNames = mapOf(
-            "quark" to ".quarkcookie",
-            "uc" to ".ucpancookie",
-            "baidu" to ".baiducookie",
-            "115" to ".115cookie",
+            "quark" to listOf(".quarkcookie", "quark_cookie.txt"),
+            "uc" to listOf(".ucpancookie", "uc_cookie.txt"),
+            "baidu" to listOf(".baiducookie", "baidu_cookie.txt", "baidu.txt"),
+            "115" to listOf(".115cookie", "115_cookie.txt"),
         )
         val roots = mutableSetOf<File>()
         try {
@@ -254,11 +254,13 @@ class SpiderHostPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             roots.add(ctx.getDir("TV", Context.MODE_PRIVATE))
             roots.add(File(ctx.dataDir, "files/TV"))
             roots.add(File(ctx.cacheDir, "files/TV"))
+            ctx.getExternalFilesDir(null)?.let { roots.add(File(it, "TV")) }
             if (driveCacheDir.isNotEmpty()) roots.add(File(driveCacheDir, "files/TV"))
         } catch (_: Throwable) {}
-        for ((provider, name) in fileNames) {
+        for ((provider, names) in fileNames) {
             val value = driveCookies[provider].orEmpty()
             for (root in roots) {
+                for (name in names) {
                 try {
                     val file = File(root, name)
                     if (value.isEmpty()) {
@@ -267,7 +269,8 @@ class SpiderHostPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                         root.mkdirs()
                         file.writeText(value)
                     }
-                } catch (_: Throwable) {}
+                    } catch (_: Throwable) {}
+                }
             }
         }
 
@@ -536,6 +539,7 @@ val reader = sock.getInputStream().bufferedReader()
 val requestLine = reader.readLine() ?: return
 val parts = requestLine.split(" ")
 if (parts.size < 2) { sock.close(); return }
+            val isHead = parts[0].equals("HEAD", ignoreCase = true)
 val uri = java.net.URI.create("http://localhost" + parts[1])
 val params = LinkedHashMap<String, String>()
 uri.query?.split("&")?.forEach { pair ->
@@ -578,7 +582,9 @@ val headers = buildString {
 }
 val os = sock.getOutputStream()
 os.write(headers.toByteArray())
-if (out.bodyStream != null) {
+if (isHead) {
+                try { out.bodyStream?.close() } catch (_: Throwable) {}
+            } else if (out.bodyStream != null) {
     out.bodyStream.use { stream ->
         val buf = ByteArray(8192)
         while (true) {
@@ -635,17 +641,34 @@ private fun invokeProxy(params: Map<String, String>): ProxyResponse {
     val sp = holder.instance
     val clazz = holder.clazz
     return try {
-        var ret = try {
-            clazz.getMethod("proxy", Map::class.java).invoke(sp, params)
+        fun callGlobalProxy(): Any? = try {
+            Class.forName("com.github.catvod.spider.Proxy", true, holder.loader)
+                .getMethod("proxy", Map::class.java)
+                .invoke(null, params)
+        } catch (_: ClassNotFoundException) {
+            null
         } catch (_: NoSuchMethodException) {
             null
         }
-        if (ret == null) {
-            ret = try {
-                clazz.getMethod("proxyLocal", Map::class.java).invoke(sp, params)
+        fun callSpiderProxy(): Any? {
+            var r = try {
+                clazz.getMethod("proxy", Map::class.java).invoke(sp, params)
             } catch (_: NoSuchMethodException) {
                 null
             }
+            if (r == null) {
+                r = try {
+                    clazz.getMethod("proxyLocal", Map::class.java).invoke(sp, params)
+                } catch (_: NoSuchMethodException) {
+                    null
+                }
+            }
+            return r
+        }
+        val ret = if (params.containsKey("do")) {
+            callGlobalProxy() ?: callSpiderProxy()
+        } else {
+            callSpiderProxy() ?: callGlobalProxy()
         }
         val arr = ret as? Array<*>
             ?: return ProxyResponse(500, "text/plain; charset=utf-8", "bad proxy return".toByteArray(), null, emptyMap())
