@@ -314,7 +314,7 @@ class JarSpiderAndroidService extends JarSpiderService {
     // 只接管 /proxy 路由（对齐桌面端 spider_host.rewriteLocalProxy）：加固壳自己会
     // 起本地 HTTP 取流服务处理 /chunk 多线程分片下载，必须保持原样由壳本地服务器响应；
     // 若改写到进程内代理端口（只认 /proxy），播放器会拿到错误响应而 Source error。
-    if (uri.path == '/proxy' || uri.path.startsWith('/proxy/')) {
+    if (uri.path == '/proxy') {
       return uri.replace(host: '127.0.0.1', port: proxyPort).toString();
     }
     return url;
@@ -383,7 +383,12 @@ class JarSpiderAndroidService extends JarSpiderService {
     final text = await _invoke(site, 'detailContent', [id]);
     if (text.trim().isEmpty) return null;
     final body = MovieParser.parseJson(text);
-    return MovieParser.toDetail(body.movie, site.key);
+    final detail = MovieParser.toDetail(body.movie, site.key);
+    if (detail == null || detail.playSources.isEmpty) {
+      final preview = text.length > 300 ? text.substring(0, 300) : text;
+      AppLog.i('jar', 'detailContent 空剧集 site=${site.key} len=${text.length} raw=$preview');
+    }
+    return detail;
   }
 
   @override
