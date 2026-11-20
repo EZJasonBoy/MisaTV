@@ -30,24 +30,25 @@ class SpiderEnv {
   SpiderEnv._();
 
   /// wex 文件通道：provider → 文件名（裸 cookie）。
-  static const _wexFiles = <String, String>{
-    'quark': '.quarkcookie',
-    'uc': '.ucpancookie',
+  static const _wexFiles = <String, List<String>>{
+    'quark': ['.quarkcookie', 'quark_cookie.txt'],
+    'uc': ['.ucpancookie', 'uc_cookie.txt'],
+    'baidu': ['.baiducookie', 'baidu_cookie.txt', 'baidu.txt'],
     // 115 属于同一族的「网盘直连」，文件名为约定俗成的 `.115cookie`；
     // 不认识它的 jar 只会忽略这个文件，不会因此报错。
-    '115': '.115cookie',
-    'thunder': '.xunleitoken',
-      'guangya': '.guangyatoken',
+    '115': ['.115cookie', '115_cookie.txt'],
+    'thunder': ['.xunleitoken', '.xunleicookie', '.thundertoken', 'xunlei_token.txt', 'xunlei_cookie.txt', 'thunder_token.txt', 'xunlei.txt'],
+    'guangya': ['.guangyatoken', '.guangyacookie', 'guangya_token.txt', 'guangya_cookie.txt', 'guangya.txt'],
     };
 
   /// wex SharedPreferences 键：provider → `Wex_*` 键名。
-  static const _wexPrefKeys = <String, String>{
-    'quark': 'Wex_quark_cookie',
-    'uc': 'Wex_ucpan_cookie',
-    'baidu': 'Wex_baidu_cookie',
-    '115': 'Wex_115_cookie',
-    'thunder': 'Wex_xunlei_token',
-      'guangya': 'Wex_guangya_token',
+  static const _wexPrefKeys = <String, List<String>>{
+    'quark': ['Wex_quark_cookie'],
+    'uc': ['Wex_ucpan_cookie'],
+    'baidu': ['Wex_baidu_cookie'],
+    '115': ['Wex_115_cookie'],
+    'thunder': ['Wex_xunlei_token', 'Wex_xunlei_cookie', 'Wex_thunder_token', 'Wex_thunder_cookie', 'Wex_thunder_refresh_token', 'thunder_token', 'xunlei_token'],
+    'guangya': ['Wex_guangya_token', 'Wex_guangya_cookie', 'Wex_guangya_refresh_token', 'guangya_token', 'guangya_refresh_token'],
     };
 
   static const _wexPrefsName = 'NewWexFnw_preferences';
@@ -120,15 +121,18 @@ class SpiderEnv {
   /// 通道 1：`<spiderCache>/files/TV/.quarkcookie`（裸 cookie，jar 里直接 trim 当 Cookie 用）。
   static Future<void> _syncWexFiles(String spiderCacheDir, Map<String, String> cookies) async {
     final dir = Directory(p.join(spiderCacheDir, 'files', 'TV'));
-    _wexFiles.forEach((provider, name) {
-      final file = File(p.join(dir.path, name));
+    _wexFiles.forEach((provider, names) {
       final value = cookies[provider] ?? '';
       if (value.isEmpty) {
-        _delete(file);
+        for (final name in names) {
+          _delete(File(p.join(dir.path, name)));
+        }
         return;
       }
       dir.createSync(recursive: true);
-      file.writeAsStringSync(value, flush: true);
+      for (final name in names) {
+        File(p.join(dir.path, name)).writeAsStringSync(value, flush: true);
+      }
     });
   }
 
@@ -141,8 +145,8 @@ class SpiderEnv {
     final file = File(p.join(spiderCacheDir, 'shared_prefs', 'seed.txt'));
     final lines = <String>[
       for (final entry in _wexPrefKeys.entries)
-        if ((cookies[entry.key] ?? '').isNotEmpty)
-          '$_wexPrefsName\t${entry.value}\t${_clean(cookies[entry.key]!)}',
+        if ((cookies[entry.key] ?? '').isNotEmpty) for (final prefKey in entry.value)
+          '$_wexPrefsName\t${prefKey}\t${_clean(cookies[entry.key]!)}',
       for (final entry in seed.entries) '$_wexPrefsName\t${entry.key}\t${_clean(entry.value)}',
       // 桌面端没有 Go 代理（ARM32 + Android root 场景），强制 Java 多线程取流；
       // 否则原画线路必报「Go多线程启动失败」。
