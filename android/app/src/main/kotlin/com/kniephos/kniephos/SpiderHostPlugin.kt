@@ -223,8 +223,8 @@ class SpiderHostPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             "uc" to listOf("Wex_ucpan_cookie"),
             "baidu" to listOf("Wex_baidu_cookie"),
             "115" to listOf("Wex_115_cookie"),
-            "thunder" to listOf("Wex_xunlei_token", "Wex_xunlei_cookie", "Wex_thunder_cookie"),
-            "guangya" to listOf("Wex_guangya_token", "Wex_guangya_cookie"),
+            "thunder" to listOf("Wex_xunlei_token", "Wex_xunlei_cookie", "Wex_thunder_token", "Wex_thunder_cookie", "Wex_thunder_refresh_token", "thunder_token", "xunlei_token"),
+            "guangya" to listOf("Wex_guangya_token", "Wex_guangya_cookie", "Wex_guangya_refresh_token", "guangya_token", "guangya_refresh_token"),
         )
         try {
             val edit = ctx.getSharedPreferences("NewWexFnw_preferences", Context.MODE_PRIVATE).edit()
@@ -248,7 +248,7 @@ class SpiderHostPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             "uc" to listOf(".ucpancookie", "uc_cookie.txt"),
             "baidu" to listOf(".baiducookie", "baidu_cookie.txt", "baidu.txt"),
             "115" to listOf(".115cookie", "115_cookie.txt"),
-            "thunder" to listOf(".xunleitoken", ".xunleicookie", "xunlei_token.txt", "xunlei_cookie.txt", "xunlei.txt"),
+            "thunder" to listOf(".xunleitoken", ".xunleicookie", "xunlei_token.txt", "xunlei_cookie.txt", "xunlei.txt", ".thundertoken", "thunder_token.txt"),
             "guangya" to listOf(".guangyatoken", ".guangyacookie", "guangya_token.txt", "guangya_cookie.txt", "guangya.txt"),
         )
         val roots = mutableSetOf<File>()
