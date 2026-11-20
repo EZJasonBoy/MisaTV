@@ -219,16 +219,20 @@ class SpiderHostPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
 
         // 通道 1：SharedPreferences（真实实现用 Init.context().getSharedPreferences）。
         val prefKeys = mapOf(
-            "quark" to "Wex_quark_cookie",
-            "uc" to "Wex_ucpan_cookie",
-            "baidu" to "Wex_baidu_cookie",
-            "115" to "Wex_115_cookie",
+            "quark" to listOf("Wex_quark_cookie"),
+            "uc" to listOf("Wex_ucpan_cookie"),
+            "baidu" to listOf("Wex_baidu_cookie"),
+            "115" to listOf("Wex_115_cookie"),
+            "thunder" to listOf("Wex_xunlei_token", "Wex_xunlei_cookie", "Wex_thunder_cookie"),
+            "guangya" to listOf("Wex_guangya_token", "Wex_guangya_cookie"),
         )
         try {
             val edit = ctx.getSharedPreferences("NewWexFnw_preferences", Context.MODE_PRIVATE).edit()
-            for ((provider, key) in prefKeys) {
+            for ((provider, keys) in prefKeys) {
                 val value = driveCookies[provider].orEmpty()
+                for (key in keys) {
                 if (value.isEmpty()) edit.remove(key) else edit.putString(key, value)
+                }
             }
             edit.putString("pan.thread_proxy_mode", "java")
             for ((k, v) in driveSeed) {
@@ -244,6 +248,8 @@ class SpiderHostPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             "uc" to listOf(".ucpancookie", "uc_cookie.txt"),
             "baidu" to listOf(".baiducookie", "baidu_cookie.txt", "baidu.txt"),
             "115" to listOf(".115cookie", "115_cookie.txt"),
+            "thunder" to listOf(".xunleitoken", ".xunleicookie", "xunlei_token.txt", "xunlei_cookie.txt", "xunlei.txt"),
+            "guangya" to listOf(".guangyatoken", ".guangyacookie", "guangya_token.txt", "guangya_cookie.txt", "guangya.txt"),
         )
         val roots = mutableSetOf<File>()
         try {
@@ -281,6 +287,8 @@ class SpiderHostPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 "quark" to "quark_cookie.txt",
                 "uc" to "uc_cookie.txt",
                 "baidu" to "baidu.txt",
+                "thunder" to "xunlei_cookie.txt",
+                "guangya" to "guangya_token.txt",
             )
             for ((provider, name) in names) {
                 val value = driveCookies[provider].orEmpty()
