@@ -364,12 +364,16 @@ class SearchProgress {
     this.finished = false,
     this.sourceItems = const {},
     this.filterSummary = '',
+    this.timedOut = false,
   });
   final List<VodItem> items;
   final List<SearchPerSource> perSource;
   final int done;
   final int total;
   final bool finished;
+
+  /// 是否因为整轮时间预算到期而提前收口（部分源未返回，已返回结果保留）。
+  final bool timedOut;
 
   /// 每个源自己的原始结果（未做跨源去重），供「只看某个源」切换。
   final Map<String, List<VodItem>> sourceItems;

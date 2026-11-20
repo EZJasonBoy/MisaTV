@@ -11,6 +11,7 @@ import 'package:path_provider/path_provider.dart';
 import '../../core/logging/app_log.dart';
 import '../../core/logging/log_redact.dart';
 import '../../core/net/app_http.dart';
+import '../../core/platform/process_job.dart';
 import '../../core/net/doh_client_io.dart';
 import '../../core/net/proxy_runtime.dart';
 import '../../core/net/url_utils.dart';
@@ -27,6 +28,7 @@ import '../relay/local_relay.dart';
 import '../jvm/jvm_runtime.dart';
 import '../movie_parser.dart';
 import '../play_result_parser.dart';
+import '../search_round.dart';
 import 'bili_dash_fallback.dart';
 import 'hyms_native.dart';
 import 'spider_env.dart';
@@ -224,6 +226,16 @@ class JarSpiderService {
   final Map<String, int> _serveHostSeq = {};
   final Map<String, Timer> _serveIdleTimers = {};
   static const _servePoolMax = 3;
+
+  /// 当前搜索轮次：新搜索 / 用户取消 / 时间预算到期时递增，旧轮次排队中的
+  /// JAR 调用在真正起进程前自行退出，避免 UI 已放弃而后台还跑几分钟。
+  int _searchRound = 0;
+
+  /// 一次性 JVM 的全局并发闸门。serve host 每池最多 3 只，但源失效时会退回
+  /// 一次性进程；不设全局上限时一轮搜索可能同时起几十只 JVM，CPU/磁盘互相拖慢。
+  static const _oneShotMax = 4;
+  int _oneShotRunning = 0;
+  final List<Completer<void>> _oneShotWaiters = [];
   static const _serveIdleDefault = Duration(seconds: 45);
   static const _serveIdleKeepWarm = Duration(minutes: 2);
   Duration _serveIdleTimeout = _serveIdleDefault;
@@ -231,6 +243,69 @@ class JarSpiderService {
   /// 性能设置：搜索 / 浏览结束后让常驻 JVM 多保留一段时间，减少再次冷启动。
   void setKeepHostsWarm(bool value) {
     _serveIdleTimeout = value ? _serveIdleKeepWarm : _serveIdleDefault;
+  }
+
+  /// 新一轮搜索开始：旧轮次排队中的 JAR 调用全部作废。
+  void beginSearchRound(int round) {
+    _searchRound = round;
+    unawaited(_killSearchHosts());
+  }
+
+  /// 搜索被取消 / 时间预算到期：只作废指定的那一轮，避免误伤已经开始的下一轮。
+  void cancelSearchRound(int round) {
+    if (_searchRound != round) return;
+    _searchRound++;
+    unawaited(_killSearchHosts());
+  }
+
+  /// 结束仍被搜索占用的 serve host，把主机让给详情 / 播放。
+  /// 播放 pin 住的 host 不动，避免正在播放的取流被误杀。
+  Future<void> _killSearchHosts() async {
+    for (final entry in _servePools.entries.toList()) {
+      for (final host in entry.value.toList()) {
+        if (host.searchInflight <= 0) continue;
+        if (identical(host, _playServeHost)) continue;
+        entry.value.remove(host);
+        await host.killNow();
+      }
+      if (entry.value.isEmpty) {
+        _servePools.remove(entry.key);
+        _serveIdleTimers.remove(entry.key)?.cancel();
+      }
+    }
+  }
+
+  /// 只对「在搜索 Zone 里」的调用生效；home / detail / play 不受影响。
+  void _checkSearchRound() {
+    final round = Zone.current[searchRoundZoneKey];
+    if (round is! int) return;
+    if (round != _searchRound) throw const SearchCancelledException();
+  }
+
+  /// 搜索调用给 JAR 进程的等待上限：最多 45 秒，和聚合搜索的单源上限对齐。
+  /// 非搜索（首页 / 详情 / 播放）保持原 timeout，不缩短大文件解析窗口。
+  Duration _effectiveTimeout(Duration timeout) {
+    if (Zone.current[searchRoundZoneKey] is! int) return timeout;
+    return Duration(seconds: timeout.inSeconds.clamp(20, 45));
+  }
+
+  Future<void> _acquireOneShotSlot() async {
+    if (_oneShotRunning < _oneShotMax) {
+      _oneShotRunning++;
+      return;
+    }
+    final waiter = Completer<void>();
+    _oneShotWaiters.add(waiter);
+    await waiter.future;
+  }
+
+  void _releaseOneShotSlot() {
+    if (_oneShotWaiters.isNotEmpty) {
+      // 直接把名额转交给下一个等待者，_oneShotRunning 保持不变。
+      _oneShotWaiters.removeAt(0).complete();
+    } else if (_oneShotRunning > 0) {
+      _oneShotRunning--;
+    }
   }
 
   /// 已经预热过（或正在预热）的源：同一个源只预热一次，避免反复拉起 JVM。
@@ -394,7 +469,29 @@ class JarSpiderService {
   }
 
   Future<VodDetail?> detail(SourceBean site, String id) async {
-    final text = await _invokeWithAowuFallback(site, 'detailContent', [id]);
+    String text;
+    try {
+      text = await _invokeWithAowuFallback(site, 'detailContent', [id]);
+    } catch (e, st) {
+      if (!site.isJarSpider) rethrow;
+      // 常驻 host 空闲 45 秒（开启「保持蜘蛛常驻」为 2 分钟）就会被回收。
+      // 用户停在首页超过这个时间再点详情时，新实例没有 homeContent 阶段
+      // 拿到的会话 Cookie（实测 csp_Eighteen 的 YES_Eighteen），detail 直接
+      // 抛 IndexOutOfBoundsException / 空结果。这里重放一次首页让当前实例
+      // 重新建立会话后重试；成功路径不会多付这次请求。
+      AppLog.w(
+        'source',
+        'detailContent 失败，重放 homeContent 建立会话后重试 ${site.key}',
+        e,
+      );
+      try {
+        await _invokeWithAowuFallback(site, 'homeContent', const []);
+        text = await _invokeWithAowuFallback(site, 'detailContent', [id]);
+        AppLog.i('source', 'homeContent 重放后 detailContent 成功 ${site.key}');
+      } catch (_) {
+        Error.throwWithStackTrace(e, st);
+      }
+    }
     _throwIfError(text);
     if (text.trim().isEmpty) return null;
     final body = MovieParser.parseJson(text);
@@ -402,10 +499,12 @@ class JarSpiderService {
   }
 
   Future<List<VodItem>> search(SourceBean site, String keyword) async {
+    _checkSearchRound();
     final text = await _invokeWithAowuFallback(site, 'searchContent', [
       keyword,
       '1',
     ]);
+    _checkSearchRound();
     _throwIfError(text);
     if (text.trim().isEmpty) return const [];
     final body = MovieParser.parseJson(text);
@@ -3276,6 +3375,7 @@ class JarSpiderService {
     String? servePoolSuffix,
     bool forceAowu = false,
   }) async {
+    _checkSearchRound();
     if (!await runtime.installed()) {
       final result = await RuntimeInstallPrompt.instance.ensure(
         RuntimeExtension.jvm,
@@ -3662,10 +3762,12 @@ class JarSpiderService {
     // 还没有 payload：只允许一个 unidbg 解包。搜索会并发派发多个加固壳源，
     // 同时起 3 只 768m 的模拟器进程就是「一搜内存就爆」的根因；排队后先到的
     // 解出整包，后面的直接用它的产物走 shell-shim 快路径。
+    _checkSearchRound();
     final previousGate = _nativeGate;
     final unlock = Completer<void>();
     _nativeGate = unlock.future;
     await previousGate;
+    _checkSearchRound();
     try {
       if ((await _payloadCandidates(
         key,
@@ -3851,6 +3953,7 @@ class JarSpiderService {
     void Function(JarServeHost host, String key)? serveHostListener,
     String? servePoolSuffix,
   }) async {
+    _checkSearchRound();
     try {
       return await _invoke(
         site,
@@ -3914,9 +4017,14 @@ class JarSpiderService {
   }) async {
     final argv = <String>[
       '-noverify',
+      '-Xms16m',
       '-Xmx$heap',
+      '-XX:MaxMetaspaceSize=128m',
       '-XX:+UseSerialGC',
       '-XX:TieredStopAtLevel=1',
+      // ExitGuard 依赖 SecurityManager 拦截载荷的 System.exit；JDK 17
+      // 必须显式 allow，否则 setSecurityManager 直接抛 UnsupportedOperationException。
+      '-Djava.security.manager=allow',
       '-Dfile.encoding=UTF-8',
       '-Dsun.stdout.encoding=UTF-8',
       '-Dsun.stderr.encoding=UTF-8',
@@ -4042,6 +4150,7 @@ class JarSpiderService {
     void Function(JarServeHost host, String key)? serveHostListener,
   }) async {
     for (var attempt = 0; attempt < 2; attempt++) {
+      _checkSearchRound();
       final host = await _acquireServeHost(
         key: key,
         java: java,
@@ -4051,26 +4160,39 @@ class JarSpiderService {
         proxy: proxy,
         extraProps: extraProps,
       );
+      _checkSearchRound();
       _touchServe(key);
+      final searchCall = Zone.current[searchRoundZoneKey] is int;
+      if (searchCall) host.searchInflight++;
       ServeReply reply;
       try {
         reply = await host.call(
           className: className,
           method: method,
           args: [ext, ...args],
-          timeout: timeout,
+          timeout: _effectiveTimeout(timeout),
         );
       } on ServeHostException catch (e) {
-        // 壳内的守护线程会自行退出（加固壳看门狗）/偶发崩溃：与 payload 无关，
-        // 换一只新进程重试一次；池里已剔除死 host。
-        if (attempt == 0 &&
-            (e.message.contains('已断开') || e.message.contains('已退出'))) {
+        // 壳内的守护线程会自行退出（加固壳看门狗）/偶发崩溃：与 payload 无关。
+        // 先做一次 __ping__ 健康复查：只是管道抖动就复用当前 host；确认半死
+        // 才剔除并重建，避免一次偶发失败就丢掉已经解完挑战、拿到 Cookie 的实例。
+        if (attempt == 0) {
+          final healthy = await host.ping();
+          if (!healthy) {
+            AppLog.w(
+              'jar',
+              '常驻 spider host 健康检查失败，重建 key=$key pid=${host.pid}：${e.message}',
+            );
+            await _dropServeHost(key, host);
+          }
           continue;
         }
         if (e.message.contains('已断开') || e.message.contains('已退出')) {
           rethrow;
         }
         throw SourceException('常驻蜘蛛调用失败：${e.message}');
+      } finally {
+        if (searchCall) host.searchInflight--;
       }
       _touchServe(key);
       if (!reply.ok) {
@@ -4095,27 +4217,51 @@ class JarSpiderService {
     required bool proxy,
     required List<String> extraProps,
   }) async {
+    _checkSearchRound();
     final pool = _servePools.putIfAbsent(key, () => <JarServeHost>[]);
     pool.removeWhere((host) => !host.alive);
 
     // 有空闲 host 就直接复用：顺序搜索（一次只派一个请求）不该反复冷启 JVM。
     // 只有全部在忙、且还没到上限时才多开一只换并行度。
-    for (final host in pool) {
-      if (host.inflight == 0) return host;
+    //
+    // 空闲超过 15 秒的 host 先做一次 __ping__：进程可能还活着但主线程已经卡死，
+    // 只按 alive 复用会把后续请求一起拖到超时。健康检查失败则剔除重建。
+    for (final host in pool.toList()) {
+      if (host.inflight != 0) continue;
+      if (DateTime.now().difference(host.lastUsedAt) >
+          const Duration(seconds: 15)) {
+        final healthy = await host.ping();
+        if (!healthy) {
+          AppLog.w(
+            'jar',
+            '常驻 spider host 健康检查失败，剔除 key=$key pid=${host.pid}',
+          );
+          pool.remove(host);
+          await host.killNow();
+          continue;
+        }
+      }
+      return host;
     }
 
     final starting = _serveStarting[key] ?? 0;
     if (pool.length + starting < _servePoolMax) {
       _serveStarting[key] = starting + 1;
       try {
+        _checkSearchRound();
         final seq = _serveHostSeq[key] ?? 0;
         _serveHostSeq[key] = seq + 1;
         // 播放 host 占 _proxyPort(key)，serve host 从 +1 起错开，避免端口冲突。
         final port = _proxyPort(key) + 1 + (seq % 12) * 2;
         final argv = <String>[
           '-noverify',
+          '-Xms16m',
           '-Xmx$heap',
+          '-XX:MaxMetaspaceSize=128m',
           '-XX:+UseSerialGC',
+          // ExitGuard 依赖 SecurityManager 拦截载荷的 System.exit；JDK 17
+          // 必须显式 allow，否则 setSecurityManager 直接抛 UnsupportedOperationException。
+          '-Djava.security.manager=allow',
           // 常驻 --serve 会连续处理浏览 / 搜索 / 详情，不再限制 C1-only：
           // 允许分层编译进入 C2，JSON / HTML 解析的稳态速度更好。一次性
           // 进程与 --hold 仍保留 TieredStopAtLevel=1，优先快启动。
@@ -4167,6 +4313,25 @@ class JarSpiderService {
     return pool.first;
   }
 
+  /// 剔除一只确认不健康的 host：先从池里摘掉，再结束进程；
+  /// 如果它正好是播放 pin 住的 host，同步解除 pin，避免后续继续引用死进程。
+  Future<void> _dropServeHost(String key, JarServeHost host) async {
+    final pool = _servePools[key];
+    pool?.remove(host);
+    if (pool != null && pool.isEmpty) {
+      _servePools.remove(key);
+      _serveIdleTimers.remove(key)?.cancel();
+    }
+    if (identical(_playServeHost, host)) {
+      _playServeHost = null;
+      _playServeKey = null;
+      _playServeBorrowed = false;
+      _playReaper?.cancel();
+      _playReaper = null;
+    }
+    await host.killNow();
+  }
+
   /// serve 池按「jar + payload 包」分开：不同 payload 起的 JVM 类路径不同，不能混用。
   String _servePoolKey(String key, String payload) =>
       '$key|${p.basename(payload)}';
@@ -4213,7 +4378,47 @@ class JarSpiderService {
     }
   }
 
+  /// 一次性 JVM 的统一入口：搜索轮次检查 + 全局并发闸门。
+  ///
+  /// 失效源会退回一次性进程；如果没有闸门，一轮搜索会同时起几十只 JVM，
+  /// 每只都要重新加载 stubs / 蜘蛛 jar，磁盘和 CPU 会互相拖慢，表现为
+  /// 「搜索越搜越慢、播放也跟着卡」。
   Future<String> _runJava({
+    required String java,
+    required List<String> classpath,
+    required String jar,
+    required String className,
+    required String method,
+    required String ext,
+    required List<String> args,
+    required String heap,
+    required Duration timeout,
+    required String jvmDir,
+    List<String> extraProps = const [],
+  }) async {
+    _checkSearchRound();
+    await _acquireOneShotSlot();
+    try {
+      _checkSearchRound();
+      return await _runJavaInner(
+        java: java,
+        classpath: classpath,
+        jar: jar,
+        className: className,
+        method: method,
+        ext: ext,
+        args: args,
+        heap: heap,
+        timeout: _effectiveTimeout(timeout),
+        jvmDir: jvmDir,
+        extraProps: extraProps,
+      );
+    } finally {
+      _releaseOneShotSlot();
+    }
+  }
+
+  Future<String> _runJavaInner({
     required String java,
     required List<String> classpath,
     required String jar,
@@ -4228,9 +4433,14 @@ class JarSpiderService {
   }) async {
     final argv = <String>[
       '-noverify',
+      '-Xms16m',
       '-Xmx$heap',
+      '-XX:MaxMetaspaceSize=128m',
       '-XX:+UseSerialGC',
       '-XX:TieredStopAtLevel=1',
+      // ExitGuard 依赖 SecurityManager 拦截载荷的 System.exit；JDK 17
+      // 必须显式 allow，否则 setSecurityManager 直接抛 UnsupportedOperationException。
+      '-Djava.security.manager=allow',
       '-Dfile.encoding=UTF-8',
       '-Dsun.stdout.encoding=UTF-8',
       '-Dsun.stderr.encoding=UTF-8',
@@ -4327,6 +4537,9 @@ class JarSpiderService {
     final proc = await Process.start(exe, args);
     final outFuture = proc.stdout.transform(utf8.decoder).join();
     final errFuture = proc.stderr.transform(utf8.decoder).join();
+    // d2j / dex 修复 / 一次性 SpiderRunner 都属于内部运行时：应用崩溃时
+    // 跟着 Job Object 一起结束，避免残留 java.exe 锁住缓存目录。
+    await ProcessJob.adopt(proc.pid);
     var timedOut = false;
     var exitCode = -1;
     try {
@@ -4479,6 +4692,12 @@ class JarSpiderService {
         .where((e) => e.isNotEmpty)
         .where((e) => !e.startsWith('OpenJDK 64-Bit Server VM warning'))
         .where((e) => !e.contains('-noverify were deprecated'))
+        .where((e) => !e.startsWith('WARNING: System::setSecurityManager'))
+        .where(
+          (e) => !e.startsWith(
+            'WARNING: Please consider reporting this to the maintainers',
+          ),
+        )
         .where((e) => !e.contains('BouncyCastle provider unavailable'))
         .where((e) => !e.startsWith('at '))
         .where((e) => !e.startsWith('Caused by:'))

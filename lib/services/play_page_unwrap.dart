@@ -109,6 +109,19 @@ class PlayPageUnwrap {
     return _isDriveCdnHost(host);
   }
 
+  /// 会触发「跨度限速」、且壳内 `/chunk` 通常更快的网盘取流域名。
+  ///
+  /// 只用于持续低速自动换路；115 / 阿里 / 天翼等没有这套实测数据，不参与，
+  /// 避免把本来正常的播放打断。
+  static bool isRangeThrottledDriveCdn(String url) {
+    final host = Uri.tryParse(url.trim())?.host.toLowerCase() ?? '';
+    if (host.isEmpty) return false;
+    return host.contains('drive.quark.cn') ||
+        host.contains('drive.uc.cn') ||
+        host.contains('pcs.baidu.com') ||
+        host.contains('baidupcs.com');
+  }
+
   /// 网盘取流域名后缀（含前导点，按后缀匹配）。
   static const _driveCdnSuffixes = <String>[
     'drive.quark.cn', // 夸克 / UC 下载节点：dl-pc-*.drive.quark.cn

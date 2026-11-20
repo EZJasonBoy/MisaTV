@@ -169,7 +169,7 @@ class JvmRuntime {
 
   /// 内置兼容层版本号：改了 assets/jvm 里的 jar（stubs / shell-shim / SpiderHost…）就 +1。
   /// 已安装目录只有在版本号变化时才整体刷新，避免每次启动都读一遍 5MB 资产。
-  static const _shimsRev = 13;
+  static const _shimsRev = 15;
 
   /// 老安装目录升级：把随包内置的兼容层刷新到当前版本（运行中的 JVM 占用时下次再试）。
   Future<void> ensureShims() async {

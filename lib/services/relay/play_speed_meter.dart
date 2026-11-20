@@ -17,6 +17,10 @@ class PlaySpeedMeter {
   /// 累计字节（只增）。用 int 而不是 double，避免长时间播放的精度损失。
   int _total = 0;
 
+  /// 累计转发字节数。播放页用它做「持续低速」判定，避免和
+  /// [bytesPerSecond] 的采样窗口互相干扰。
+  int get totalBytes => _total;
+
   /// 上一次采样时的累计值与时刻。
   int _sampleTotal = 0;
   Stopwatch _watch = Stopwatch()..start();
