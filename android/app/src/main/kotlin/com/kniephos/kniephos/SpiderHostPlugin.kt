@@ -247,7 +247,7 @@ class SpiderHostPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             "quark" to listOf(".quarkcookie", "quark_cookie.txt"),
             "uc" to listOf(".ucpancookie", "uc_cookie.txt"),
             "baidu" to listOf(".baiducookie", "baidu_cookie.txt", "baidu.txt"),
-            "115" to listOf(".115cookie", "115_cookie.txt, "115.txt"),
+            "115" to listOf(".115cookie", "115_cookie.txt", "115.txt"),
             "thunder" to listOf(".xunleitoken", ".xunleicookie", "xunlei_token.txt", "xunlei_cookie.txt", "xunlei.txt", ".thundertoken", "thunder_token.txt"),
             "guangya" to listOf(".guangyatoken", ".guangyacookie", "guangya_token.txt", "guangya_cookie.txt", "guangya.txt", ".guangya", "guangyapan_token.txt"),
             "bili" to listOf("bili_cookie.txt", ".bilicookie"),
