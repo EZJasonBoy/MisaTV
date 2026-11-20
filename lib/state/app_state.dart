@@ -204,7 +204,10 @@ class AppState extends ChangeNotifier {
   late final XunleiCloudService xunleiCloudService = XunleiCloudService(
     store: store,
     logger: (message) => AppLog.i('xunlei', message),
-    onChanged: notifyListeners,
+    onChanged: () {
+      _syncDriveTokens();
+      notifyListeners();
+    },
   );
 
   XunleiAccount get xunleiAccount => xunleiCloudService.account;
@@ -3709,11 +3712,15 @@ class AppState extends ChangeNotifier {
             .where((e) => !_isGuestCredential(e.key, e.value.extra['guest']))
             .map((e) => MapEntry(e.key, e.value.cookie.trim())),
       );
-    if ((driveTokens['thunder'] ?? '').trim().isEmpty && xunleiCloudService.account.loggedIn) {
-      final token = xunleiCloudService.account.refreshToken.trim();
-      if (token.isNotEmpty) {
-        driveTokens['thunder'] = token;
-      }
+    if (xunleiCloudService.account.loggedIn) {
+      final xl = xunleiCloudService.account;
+      driveTokens['thunder'] = jsonEncode({
+        'accessToken': xl.accessToken.trim(),
+        'refreshToken': xl.refreshToken.trim(),
+        'tokenType': xl.tokenType.trim().isEmpty ? 'Bearer' : xl.tokenType.trim(),
+        'userId': xl.userId.trim(),
+        'deviceId': xl.deviceId.trim(),
+      });
     }
     // 只记 provider 名，绝不把 Cookie 写进日志；下一份日志可直接判断
     // 「没登录」到底是凭据层没注入，还是壳层没读到。
