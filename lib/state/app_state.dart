@@ -3709,6 +3709,12 @@ class AppState extends ChangeNotifier {
             .where((e) => !_isGuestCredential(e.key, e.value.extra['guest']))
             .map((e) => MapEntry(e.key, e.value.cookie.trim())),
       );
+    if ((driveTokens['thunder'] ?? '').trim().isEmpty && xunleiCloudService.account.loggedIn) {
+      final token = xunleiCloudService.account.refreshToken.trim();
+      if (token.isNotEmpty) {
+        driveTokens['thunder'] = token;
+      }
+    }
     // 只记 provider 名，绝不把 Cookie 写进日志；下一份日志可直接判断
     // 「没登录」到底是凭据层没注入，还是壳层没读到。
     AppLog.i('drive', '凭据已注入蜘蛛 provider=${driveTokens.keys.toList()}');
@@ -3872,6 +3878,9 @@ class AppState extends ChangeNotifier {
     if (_refreshableProviders.contains(provider)) {
       unawaited(_refreshDriveSession(provider));
     }
+    if (provider == 'thunder' && cookie.trim().isNotEmpty && xunleiCloudService.account.refreshToken.trim() != cookie.trim()) {
+      unawaited(xunleiCloudService.loginWithRefreshToken(cookie.trim()).catchError((_) => xunleiCloudService.account));
+    }
   }
 
   Future<void> removeDriveAccount(String provider) async {
@@ -3881,6 +3890,9 @@ class AppState extends ChangeNotifier {
     await store.saveDriveAccounts(driveAccounts);
     notifyListeners();
     AppLog.i('drive', '移除网盘账号 provider=$provider');
+    if (provider == 'thunder' && xunleiCloudService.account.loggedIn) {
+      unawaited(xunleiCloudService.logout().catchError((_) {}));
+    }
   }
 
   /// 新增 / 编辑 WebDAV 服务器（保存后刷新设置页与列表）。
