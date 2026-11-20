@@ -80,7 +80,9 @@ jobs:
 
       - name: 拉取依赖
         run: flutter pub get
-
+      - name: Setup NuGet
+        uses: nuget/setup-nuget@v2
+        
       - name: 构建 Windows Release
         run: flutter build windows --release
 
