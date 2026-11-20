@@ -125,13 +125,15 @@ class SpiderHostPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     val className = call.argument<String>("className") ?: ""
                     val ext = call.argument<String>("ext") ?: ""
                     val cacheDir = call.argument<String>("cacheDir") ?: appContext?.cacheDir?.absolutePath ?: ""
-                    runAsync(result) { loadSpider(paths, className, ext, cacheDir) }
+                   val instanceKey = call.argument<String>("instanceKey") ?: ""
+                    runAsync(result) { loadSpider(paths, className, ext, cacheDir, instanceKey) }
                 }
                 "invoke" -> {
                     val method = call.argument<String>("method") ?: ""
                     val args = (call.argument<List<*>>("args") as? List<*>)?.mapNotNull { it?.toString() } ?: emptyList()
+                   val instanceKey = call.argument<String>("instanceKey") ?: ""
                     val className = call.argument<String>("className") ?: ""
-                    runAsync(result) { invoke(method, args, className) }
+                    runAsync(result) { invoke(method, args, className, instanceKey) }
                 }
                 "loadNative" -> {
                     val path = call.argument<String>("path") ?: ""
@@ -382,7 +384,7 @@ class SpiderHostPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     // 加载并初始化蜘蛛
     // ------------------------------------------------------------------
     @Synchronized   // 加固壳首次解包很贵，串行加载避免多个源同时触发重复解包
-    private fun loadSpider(paths: List<String>, className: String, ext: String, cacheDir: String): Map<String, Any?> {
+    private fun loadSpider(paths: List<String>, className: String, ext: String, cacheDir: String, instanceKey: String = ""): Map<String, Any?> {
         return try {
             // 壳的 init(Context, ext) 会把网盘 Cookie 读进内存，必须先写好凭据。
             if (cacheDir.isNotEmpty()) driveCacheDir = cacheDir
@@ -423,8 +425,9 @@ class SpiderHostPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 )
             }
 
-            if (spiders.containsKey(className)) {
-                lastClassName = className
+            val cacheKey = instanceKey.ifEmpty { className }
+            if (spiders.containsKey(cacheKey)) {
+                lastClassName = cacheKey
                 return mapOf("ok" to true, "proxyPort" to proxyPort)
             }
 
@@ -456,8 +459,8 @@ class SpiderHostPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     clazz.getMethod("initApi", apiCls).invoke(instance, api)
                 } catch (_: Throwable) { /* 多数蜘蛛没有 initApi */ }
 
-                spiders[className] = SpiderHolder(instance, clazz, loader)
-                lastClassName = className
+                spiders[cacheKey] = SpiderHolder(instance, clazz, loader)
+                lastClassName = cacheKey
 
                 // 启动进程内宿主代理（加固壳 / 哔哩聚合源会用 127.0.0.1 回放地址）
                 startProxy()
@@ -474,8 +477,8 @@ class SpiderHostPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     // ------------------------------------------------------------------
     // 反射调用蜘蛛方法（对齐 SpiderHost.java dispatchMethod）
     // ------------------------------------------------------------------
-    private fun invoke(method: String, args: List<String>, className: String = ""): Map<String, Any?> {
-        val name = className.ifEmpty { lastClassName ?: "" }
+    private fun invoke(method: String, args: List<String>, className: String = "", instanceKey: String = ""): Map<String, Any?> {
+        val name = instanceKey.ifEmpty { className.ifEmpty { lastClassName ?: "" } }
         val holder = spiders[name] ?: return errMap("蜘蛛尚未加载：$name")
         val sp = holder.instance
         val clazz = holder.clazz
