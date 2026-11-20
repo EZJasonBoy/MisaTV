@@ -222,16 +222,16 @@ class SpiderHostPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             "quark" to listOf("Wex_quark_cookie"),
             "uc" to listOf("Wex_ucpan_cookie"),
             "baidu" to listOf("Wex_baidu_cookie"),
-            "115" to listOf("Wex_115_cookie", "115_cookie", "cookie_115", "pan115_cookie"),
-            "thunder" to listOf("Wex_xunlei_token", "Wex_xunlei_cookie", "Wex_thunder_token", "Wex_thunder_cookie", "Wex_thunder_refresh_token", "thunder_token", "xunlei_token"),
-            "guangya" to listOf("Wex_guangya_token", "Wex_guangya_cookie", "Wex_guangya_refresh_token", "Wex_guangya_access_token", "Wex_guangyapan_token", "guangya_token", "guangya_refresh_token", "guangya_access_token", "guangyapan_token"),
+            "115" to listOf("Wex_pan115_cookie", "Wex_115_cookie", "115_cookie", "cookie_115", "pan115_cookie"),
+            "thunder" to listOf("thunderCfg", "Wex_thunder_token"),
+            "guangya" to listOf("Wex_GuangYa_Cache", "Wex_guangya_token"),
         )
         try {
             val edit = ctx.getSharedPreferences("NewWexFnw_preferences", Context.MODE_PRIVATE).edit()
             for ((provider, keys) in prefKeys) {
                 val value = driveCookies[provider].orEmpty()
-                for (key in keys) {
-                if (value.isEmpty()) edit.remove(key) else edit.putString(key, value)
+                for (prefKey in keys) {
+                if (value.isEmpty()) edit.remove(prefKey) else edit.putString(prefKey, formatWexPrefValue(prefKey, value))
                 }
             }
             edit.putString("pan.thread_proxy_mode", "java")
@@ -311,7 +311,74 @@ class SpiderHostPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         } catch (_: Throwable) {}
     }
 
-    // ------------------------------------------------------------------
+    private fun formatWexPrefValue(prefKey: String, raw: String): String {
+        val trimmed = raw.trim()
+        return when (prefKey) {
+            "Wex_GuangYa_Cache" -> {
+                var tokenType = "Bearer"
+                var accessToken = ""
+                var refreshToken = ""
+                if (trimmed.startsWith("{")) {
+                    try {
+                        val obj = JSONObject(trimmed)
+                        tokenType = obj.optString("token_type").ifEmpty { obj.optString("tokenType") }.ifEmpty { "Bearer" }
+                        accessToken = obj.optString("access_token").ifEmpty { obj.optString("accessToken") }
+                        refreshToken = obj.optString("refresh_token").ifEmpty { obj.optString("refreshToken") }
+                    } catch (_: Throwable) {
+                        refreshToken = trimmed
+                    }
+                } else {
+                    refreshToken = trimmed
+                }
+                JSONObject().apply {
+                    put("token_type", tokenType)
+                    put("access_token", accessToken)
+                    put("refresh_token", refreshToken)
+                }.toString()
+            }
+            "thunderCfg" -> {
+                var accessToken = ""
+                var refreshToken = ""
+                var tokenType = "Bearer"
+                var userId = ""
+                var deviceId = ""
+                var deviceSign = ""
+                var peerId = ""
+                if (trimmed.startsWith("{")) {
+                    try {
+                        val obj = JSONObject(trimmed)
+                        accessToken = obj.optString("accessToken").ifEmpty { obj.optString("access_token") }
+                        refreshToken = obj.optString("refreshToken").ifEmpty { obj.optString("refresh_token") }
+                        tokenType = obj.optString("tokenType").ifEmpty { obj.optString("token_type") }.ifEmpty { "Bearer" }
+                        userId = obj.optString("userId").ifEmpty { obj.optString("user_id") }
+                        deviceId = obj.optString("deviceId").ifEmpty { obj.optString("device_id") }
+                        deviceSign = obj.optString("deviceSign").ifEmpty { obj.optString("device_sign") }
+                        peerId = obj.optString("peerId").ifEmpty { obj.optString("peer_id") }
+                    } catch (_: Throwable) {
+                        refreshToken = trimmed
+                    }
+                } else {
+                    refreshToken = trimmed
+                }
+                JSONObject().apply {
+                    put("accessToken", accessToken)
+                    put("refreshToken", refreshToken)
+                    put("tokenType", tokenType)
+                    put("userId", userId)
+                    put("expireTime", 0)
+                    put("authVersion", "downloadprovider-25.0.6.30")
+                    put("authPackage", "com.xunlei.downloadprovider")
+                    put("authClientId", "Xp6vsxz_7IYVw2BB")
+                    if (deviceId.isNotEmpty()) put("deviceId", deviceId)
+                    if (deviceSign.isNotEmpty()) put("deviceSign", deviceSign)
+                    if (peerId.isNotEmpty()) put("peerId", peerId)
+                }.toString()
+            }
+            else -> raw
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // 加载并初始化蜘蛛
     // ------------------------------------------------------------------
     @Synchronized   // 加固壳首次解包很贵，串行加载避免多个源同时触发重复解包
