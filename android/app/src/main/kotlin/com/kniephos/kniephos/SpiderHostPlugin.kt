@@ -554,6 +554,19 @@ uri.query?.split("&")?.forEach { pair ->
     val eq = pair.indexOf('=')
     if (eq > 0) params[decode(pair.substring(0, eq))] = decode(pair.substring(eq + 1))
 }
+val rawPath = uri.rawPath ?: ""
+            if (rawPath.startsWith("/proxy/")) {
+                val sub = rawPath.removePrefix("/proxy/")
+val slashIdx = sub.indexOf('/')
+val firstRaw = if (slashIdx >= 0) sub.substring(0, slashIdx) else sub
+val restRaw = if (slashIdx >= 0) sub.substring(slashIdx + 1) else ""
+val firstSeg = java.net.URLDecoder.decode(firstRaw, "UTF-8")
+val restPath = java.net.URLDecoder.decode(restRaw, "UTF-8")
+if (firstSeg.isNotEmpty() && !params.containsKey("do")) params["do"] = firstSeg
+params["path"] = java.net.URLDecoder.decode(sub, "UTF-8")
+params["uri"] = rawPath
+if (restPath.isNotEmpty()) params["subpath"] = restPath
+            }
 while (true) {
     val line = reader.readLine() ?: break
     if (line.isEmpty()) break
