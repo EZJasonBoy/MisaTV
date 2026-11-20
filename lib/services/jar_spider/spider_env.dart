@@ -46,9 +46,9 @@ class SpiderEnv {
     'quark': ['Wex_quark_cookie'],
     'uc': ['Wex_ucpan_cookie'],
     'baidu': ['Wex_baidu_cookie'],
-    '115': ['Wex_115_cookie'],
-    'thunder': ['Wex_xunlei_token', 'Wex_xunlei_cookie', 'Wex_thunder_token', 'Wex_thunder_cookie', 'Wex_thunder_refresh_token', 'thunder_token', 'xunlei_token'],
-    'guangya': ['Wex_guangya_token', 'Wex_guangya_cookie', 'Wex_guangya_refresh_token', 'guangya_token', 'guangya_refresh_token'],
+    '115': ['Wex_pan115_cookie', 'Wex_115_cookie'],
+    'thunder': ['thunderCfg', 'Wex_thunder_token'],
+    'guangya': ['Wex_GuangYa_Cache', 'Wex_guangya_token'],
     };
 
   static const _wexPrefsName = 'NewWexFnw_preferences';
@@ -146,7 +146,7 @@ class SpiderEnv {
     final lines = <String>[
       for (final entry in _wexPrefKeys.entries)
         if ((cookies[entry.key] ?? '').isNotEmpty) for (final prefKey in entry.value)
-          '$_wexPrefsName\t$prefKey\t${_clean(cookies[entry.key]!)}',
+          '$_wexPrefsName\t$prefKey\t${_clean(_formatWexPrefValue(prefKey, cookies[entry.key]!))}',
       for (final entry in seed.entries) '$_wexPrefsName\t${entry.key}\t${_clean(entry.value)}',
       // 桌面端没有 Go 代理（ARM32 + Android root 场景），强制 Java 多线程取流；
       // 否则原画线路必报「Go多线程启动失败」。
@@ -159,7 +159,45 @@ class SpiderEnv {
     file.parent.createSync(recursive: true);
     file.writeAsStringSync('${lines.join('\n')}\n', flush: true);
   }
-
+  static String _formatWexPrefValue(String prefKey, String raw) {
+    if (prefKey != 'Wex_GuangYa_Cache' && prefKey != 'thunderCfg') return raw;
+final trimmed = raw.trim();
+Map<String, dynamic>? m;
+if (trimmed.startsWith('{')) {
+try {
+final decoded = jsonDecode(trimmed);
+if (decoded is Map) m = decoded.map((k, v) => MapEntry('$k', v));
+} catch (_) {}
+}
+String pick(String a, String b, [String fallback = '']) {
+final v = '${m?[a] ?? m?[b] ?? ''}'.trim();
+return v.isNotEmpty ? v : fallback;
+}
+if (prefKey == 'Wex_GuangYa_Cache') {
+return jsonEncode({
+'token_type': pick('token_type', 'tokenType', 'Bearer'),
+'access_token': m == null ? '' : pick('access_token', 'accessToken'),
+'refresh_token': m == null ? trimmed : pick('refresh_token', 'refreshToken'),
+});
+}
+    final deviceId = pick('deviceId', 'device_id');
+    final deviceSign = pick('deviceSign', 'device_sign');
+    final peerId = pick('peerId', 'peer_id');
+    return jsonEncode({
+      'accessToken': m == null ? '' : pick('accessToken', 'access_token'),
+      'refreshToken': m == null ? trimmed : pick('refreshToken', 'refresh_token'),
+      'tokenType': pick('tokenType', 'token_type', 'Bearer'),
+      'userId': pick('userId', 'user_id'),
+      'expireTime': 0,
+      'authVersion': 'downloadprovider-25.0.6.30',
+      'authPackage': 'com.xunlei.downloadprovider',
+      'authClientId': 'Xp6vsxz_7IYVw2BB',
+      if (deviceId.isNotEmpty) 'deviceId': deviceId,
+      if (deviceSign.isNotEmpty) 'deviceSign': deviceSign,
+      if (peerId.isNotEmpty) 'peerId': peerId,
+    });
+  }
+  
   /// 通道 5：`<数据目录>/TVBox/{bili_cookie,115}.txt`（裸 cookie 串）。
   ///
   /// 哔哩系蜘蛛的 ext 直接写 `http://127.0.0.1:9978/file/TVBox/bili_cookie.txt`，
