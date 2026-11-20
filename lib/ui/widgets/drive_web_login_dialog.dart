@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 import '../../app.dart';
@@ -317,7 +318,8 @@ class _DriveWebLoginDialogState extends State<_DriveWebLoginDialog> {
   String? _guangyaAuthUrl;
   String? _guangyaUserCode;
   bool _guangyaAuthLoading = false;
-  String? _error;
+  String? _guangyaError;
+    String? _error;
 
   _WebLoginConfig get _config => widget.config;
 
@@ -338,7 +340,7 @@ class _DriveWebLoginDialogState extends State<_DriveWebLoginDialog> {
   }
   Future<void> _startGuangyaDeviceAuth() async {
     if (_guangyaAuthLoading) return;
-    _guangyaAuthLoading = true;
+    if (mounted) { setState(() { _guangyaAuthLoading = true; _guangyaError = null; }); }
     final client = HttpClient();
     try {
       final req = await client.postUrl(
@@ -369,24 +371,45 @@ class _DriveWebLoginDialogState extends State<_DriveWebLoginDialog> {
               _guangyaDeviceCode = deviceCode;
               _guangyaUserCode = userCode.isNotEmpty ? userCode : null;
               _guangyaAuthUrl = authUrl;
-              if (userCode.isNotEmpty) {
-                _status = '请完成光鸭官方授权（授权码：$userCode）';
-              }
-            });
-            final controller = _controller;
-            if (controller != null) {
-              await controller.loadUrl(
-                urlRequest: URLRequest(url: WebUri(authUrl)),
-              );
+            _guangyaAuthLoading = false;
+            if (userCode.isNotEmpty) {
+              _status = '请完成光鸭官方授权（授权码：$userCode）';
             }
-          }
+          });
+          _timer ??= Timer.periodic(
+            const Duration(seconds: 2),
+            (_) => _poll(),
+          );
+        } else if (mounted) {
+          setState(() {
+            _guangyaError = '光鸭授权响应缺少必要字段（device_code 或 verification_uri）';
+            _guangyaAuthLoading = false;
+          });
         }
+      } else if (mounted) {
+        setState(() {
+          _guangyaError = '获取光鸭授权码失败：响应格式异常';
+          _guangyaAuthLoading = false;
+        });
       }
-    } catch (_) {
-      // Keep fallback loginUrl / localStorage scan if device auth request fails.
-    } finally {
-      client.close();
-      _guangyaAuthLoading = false;
+    } else if (mounted) {
+      setState(() {
+        _guangyaError = '获取光鸭授权码失败（HTTP ${resp.statusCode}）';
+        _guangyaAuthLoading = false;
+      });
+    }
+  } catch (e) {
+    if (mounted) {
+      setState(() {
+        _guangyaError = '获取光鸭授权码失败：$e';
+        _guangyaAuthLoading = false;
+      });
+    }
+  } finally {
+    client.close();
+    if (mounted && _guangyaAuthLoading) {
+      setState(() => _guangyaAuthLoading = false);
+    }
     }
   }
 
@@ -700,6 +723,128 @@ class _DriveWebLoginDialogState extends State<_DriveWebLoginDialog> {
     Navigator.of(context).pop(true);
   }
 
+  Widget _buildGuangyaQrBody(BuildContext context) {
+    final theme = Theme.of(context);
+    if (_guangyaAuthLoading) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const CircularProgressIndicator(),
+            const SizedBox(height: 16),
+            Text(
+              '正在获取光鸭登录二维码...',
+              style: theme.textTheme.bodyMedium,
+            ),
+          ],
+        ),
+      );
+    }
+    if (_guangyaError != null || (_guangyaAuthUrl ?? '').isEmpty) {
+      return Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.error_outline_rounded,
+                size: 40,
+                color: theme.colorScheme.error,
+              ),
+              const SizedBox(height: 12),
+              Text(
+                _guangyaError ?? '未能获取光鸭登录二维码',
+                textAlign: TextAlign.center,
+                style: theme.textTheme.bodyMedium,
+              ),
+              const SizedBox(height: 16),
+              FilledButton.icon(
+                onPressed: _startGuangyaDeviceAuth,
+                icon: const Icon(Icons.refresh_rounded),
+                label: const Text('重新获取二维码'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    final qrUrl = Uri.https(
+      'api.qrserver.com',
+      '/v1/create-qr-code/',
+      {
+        'size': '280x280',
+        'margin': '12',
+        'data': _guangyaAuthUrl!,
+      },
+    ).toString();
+
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Image.network(
+                qrUrl,
+                width: 220,
+                height: 220,
+                fit: BoxFit.contain,
+              ),
+            ),
+            if ((_guangyaUserCode ?? '').isNotEmpty) ...[
+              const SizedBox(height: 16),
+              SelectableText(
+                '授权码：$_guangyaUserCode',
+                style: theme.textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+            const SizedBox(height: 12),
+            Text(
+              '请使用「光鸭云盘 App」扫码确认登录\n（同一台手机可先截屏，再在光鸭 App 扫一扫 → 相册选择截屏）',
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 20),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: () {
+                    Clipboard.setData(ClipboardData(text: _guangyaAuthUrl!));
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('已复制光鸭授权链接')),
+                    );
+                  },
+                  icon: const Icon(Icons.copy_rounded, size: 18),
+                  label: const Text('复制授权链接'),
+                ),
+                const SizedBox(width: 12),
+                FilledButton.tonalIcon(
+                  onPressed: _startGuangyaDeviceAuth,
+                  icon: const Icon(Icons.refresh_rounded, size: 18),
+                  label: const Text('刷新二维码'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -764,7 +909,9 @@ class _DriveWebLoginDialogState extends State<_DriveWebLoginDialog> {
             ),
             const Divider(height: 1),
             Expanded(
-              child: Stack(
+              child: _config.provider == 'guangya'
+                  ? _buildGuangyaQrBody(context)
+                  : Stack(
                 children: [
                   Positioned.fill(
                     child: InAppWebView(
