@@ -3,6 +3,7 @@ package com.kniephos.kniephos
 import android.app.Application
 import android.content.Context
 import android.content.ContextWrapper
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import io.flutter.embedding.engine.plugins.FlutterPlugin
@@ -288,28 +289,75 @@ class SpiderHostPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
 
         // 通道 3：Pizazz / 太太太硬了 家族的 JSON 三字段判定。
         try {
-            val dir = File(ctx.cacheDir, "tvbox-ext/TVBox").apply { mkdirs() }
-            val names = mapOf(
-                "quark" to "quark_cookie.txt",
-                "uc" to "uc_cookie.txt",
-                "baidu" to "baidu.txt",
-                "thunder" to "xunlei_cookie.txt",
-                "guangya" to "guangya_token.txt",
-            "115" to "115.txt",
-            )
-            for ((provider, name) in names) {
-                val value = driveCookies[provider].orEmpty()
-                val file = File(dir, name)
-                if (value.isEmpty()) {
-                    file.delete()
-                    continue
-                }
-                val obj = JSONObject()
-                    .put("cookie", value)
-                    .put("nickname", "MisaTV")
-                    .put("member_type", "1")
-                file.writeText(obj.toString())
+           val dirs = mutableListOf<File>()
+           runCatching { dirs.add(File(ctx.cacheDir, "tvbox-ext/TVBox").apply { mkdirs() }) }
+           runCatching { dirs.add(File(Environment.getExternalStorageDirectory(), "TVBox").apply { mkdirs() }) }
+val names = mapOf("quark" to "quark_cookie.txt", "uc" to "uc_cookie.txt", "baidu" to "baidu.txt", "thunder" to "xunlei_cookie.txt", "guangya" to "guangya_token.txt", "115" to "115.txt")
+            val tokenFiles = mapOf("thunder" to "xunlei.txt", "guangya" to "guangya.txt")
+for (dir in dirs) {
+    for ((provider, name) in names) {
+        runCatching {
+            val value = driveCookies[provider].orEmpty()
+            val file = File(dir, name)
+            if (value.isEmpty()) {
+                file.delete()
+                return@runCatching
             }
+            val obj = JSONObject()
+                .put("cookie", value)
+                .put("nickname", "MisaTV")
+                .put("member_type", "1")
+            file.writeText(obj.toString())
+        }
+    }
+    for ((provider, fileName) in tokenFiles) {
+        runCatching {
+            val raw = driveCookies[provider].orEmpty().trim()
+            val file = File(dir, fileName)
+            if (raw.isEmpty()) {
+                file.delete()
+                return@runCatching
+            }
+            var tokenType = "Bearer"
+            var accessToken = raw
+            var refreshToken = ""
+            var sub = ""
+            var expiresIn = 7200L
+            var deviceId = ""
+            if (raw.startsWith("{")) {
+                runCatching {
+                    val src = JSONObject(raw)
+                    val resp = src.optJSONObject("token_resp") ?: src
+                    accessToken = resp.optString("access_token").ifEmpty { resp.optString("accessToken") }
+                    refreshToken = resp.optString("refresh_token").ifEmpty { resp.optString("refreshToken") }
+                    tokenType = resp.optString("token_type").ifEmpty { resp.optString("tokenType") }.ifEmpty { "Bearer" }
+                    sub = resp.optString("sub").ifEmpty { resp.optString("userId") }
+                    val exp = resp.optLong("expires_in", resp.optLong("expireTime", 7200L))
+                    if (exp > 0L) expiresIn = exp
+                    deviceId = src.optString("deviceid").ifEmpty { src.optString("deviceId") }
+                }
+            }
+            if (deviceId.isEmpty()) {
+                val digest = java.security.MessageDigest.getInstance("MD5").digest("MisaTV:$provider:$accessToken".toByteArray())
+                deviceId = digest.joinToString("") { "%02x".format(it) }
+            }
+            val expiresEnd = System.currentTimeMillis() + expiresIn * 1000L
+            val tokenResp = JSONObject()
+                .put("token_type", tokenType)
+                .put("access_token", accessToken)
+                .put("refresh_token", refreshToken)
+                .put("sub", sub)
+                .put("expires_in", expiresIn)
+                .put("expires_end", expiresEnd)
+            val payload = JSONObject()
+                .put("token_resp", tokenResp)
+                .put("deviceid", deviceId)
+                .put("username", "MisaTV")
+            file.writeText(payload.toString())
+        }
+    }
+}
+
         } catch (_: Throwable) {}
     }
 
