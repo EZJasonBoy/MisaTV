@@ -254,6 +254,62 @@ return jsonEncode({
       dir.createSync(recursive: true);
       file.writeAsStringSync(jsonEncode(body), flush: true);
     }
+  const tokenFiles = {'thunder': 'xunlei.txt', 'guangya': 'guangya.txt'};
+for (final entry in tokenFiles.entries) {
+  final file = File(p.join(dir.path, entry.value));
+  final raw = (cookies[entry.key] ?? '').trim();
+  if (raw.isEmpty) {
+    _delete(file);
+    continue;
+  }
+  var tokenType = 'Bearer';
+  var accessToken = raw;
+  var refreshToken = '';
+  var sub = '';
+  var expiresIn = 7200;
+  var deviceId = '';
+  if (raw.startsWith('{')) {
+    try {
+      final src = jsonDecode(raw);
+      if (src is Map) {
+        final resp = src['token_resp'] is Map ? src['token_resp'] as Map : src;
+        final at = '${resp['access_token'] ?? resp['accessToken'] ?? ''}'.trim();
+        if (at.isNotEmpty) accessToken = at;
+        refreshToken = '${resp['refresh_token'] ?? resp['refreshToken'] ?? ''}'.trim();
+        final tt = '${resp['token_type'] ?? resp['tokenType'] ?? ''}'.trim();
+        if (tt.isNotEmpty) tokenType = tt;
+        sub = '${resp['sub'] ?? resp['userId'] ?? ''}'.trim();
+        final expRaw = resp['expires_in'] ?? resp['expireTime'];
+        final exp = expRaw is num ? expRaw.toInt() : int.tryParse('${expRaw ?? ''}') ?? 7200;
+        if (exp > 0) expiresIn = exp;
+        deviceId = '${src['deviceid'] ?? src['deviceId'] ?? ''}'.trim();
+      }
+    } catch (_) {}
+  }
+  if (deviceId.isEmpty) {
+    final seed = utf8.encode('MisaTV:${entry.key}:$accessToken');
+    final bytes = List<int>.filled(16, 0);
+    for (var i = 0; i < seed.length; i++) {
+      bytes[i % 16] = (bytes[i % 16] * 31 + seed[i] + i) & 0xff;
+    }
+    deviceId = bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+  }
+  final expiresEnd = DateTime.now().millisecondsSinceEpoch + expiresIn * 1000;
+  final payload = {
+    'token_resp': {
+      'token_type': tokenType,
+      'access_token': accessToken,
+      'refresh_token': refreshToken,
+      'sub': sub,
+      'expires_in': expiresIn,
+      'expires_end': expiresEnd,
+    },
+    'deviceid': deviceId,
+    'username': 'MisaTV',
+  };
+  dir.createSync(recursive: true);
+  file.writeAsStringSync(jsonEncode(payload), flush: true);
+}
   }
 
   /// 通道 4：fty 系 `Cloud-drive` 配置（源在 init 时读取 quarkCookie / ucCookie）。
