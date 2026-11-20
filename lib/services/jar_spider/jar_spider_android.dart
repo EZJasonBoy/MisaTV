@@ -231,7 +231,7 @@ class JarSpiderAndroidService extends JarSpiderService {
   Future<_LoadedSpider> _ensureLoaded(SourceBean site) async {
     final raw = await _acquireJar(site);
     final className = _className(site);
-    final cacheKey = '${p.basenameWithoutExtension(raw.path)}|$className';
+    final cacheKey = '${p.basenameWithoutExtension(raw.path)}|${site.key}|$className';
     final spiderDir = await _spiderCacheDir();
 
     final stamp = _currentStamp();
@@ -262,6 +262,7 @@ class JarSpiderAndroidService extends JarSpiderService {
         'className': className,
         'ext': ext,
         'cacheDir': spiderDir,
+        'instanceKey': cacheKey,
       },
     );
     final ok = reply?['ok'] == true;
@@ -287,7 +288,7 @@ class JarSpiderAndroidService extends JarSpiderService {
   }
 
   Future<String> _invoke(SourceBean site, String method, List<String> args) async {
-    await _ensureLoaded(site);
+    final loaded = await _ensureLoaded(site);
     final reply = await _channel.invokeMethod<Map<dynamic, dynamic>>(
       'invoke',
       {
@@ -295,6 +296,7 @@ class JarSpiderAndroidService extends JarSpiderService {
         'args': args,
         // 插件侧按类名保存多个蜘蛛实例，避免同时加载多个源时互相覆盖。
         'className': _className(site),
+        'instanceKey': loaded.key,
       },
     );
     final ok = reply?['ok'] == true;
