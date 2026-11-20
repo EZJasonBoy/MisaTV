@@ -181,7 +181,7 @@ const _webLoginConfigs = <String, _WebLoginConfig>{
   'guangya': _WebLoginConfig(
     provider: 'guangya',
     name: '光鸭云盘',
-    loginUrl: 'https://www.guangyapan.com/',
+    loginUrl: 'https://www.guangyapan.com/home/',
     scope: 'https://www.guangyapan.com',
     cookieScopes: [
       'https://www.guangyapan.com',
@@ -419,58 +419,24 @@ class _DriveWebLoginDialogState extends State<_DriveWebLoginDialog> {
           source: '''
             (function() {
               try {
-                var out = [];
+                var fallback = '';
                 for (var i = 0; i < localStorage.length; i++) {
                   var k = localStorage.key(i);
                   if (!k) continue;
                   if (k.indexOf('credentials_') === 0 || k === 'token' || k === 'auth_token') {
-                    var v = localStorage.getItem(k);
-                    if (v) out.push(v);
+                    var raw = localStorage.getItem(k);
+                    if (!raw) continue; try { var o = JSON.parse(raw); if (o && typeof o === 'object') { var at = o.access_token || o.accessToken || ''; var rt = o.refresh_token || o.refreshToken || ''; if ((typeof at === 'string' && at.length >= 10) || (typeof rt === 'string' && rt.length >= 10)) { return JSON.stringify({token_type: o.token_type || o.tokenType || 'Bearer', access_token: o.access_token || o.accessToken || '', refresh_token: o.refresh_token || o.refreshToken || ''}); } } } catch (e) { if (!fallback && raw.length >= 20) fallback = raw; }
                   }
                 }
-                return JSON.stringify(out);
+                return fallback || null;
               } catch (e) {
-                return '[]';
+                return null;
               }
             })();
           ''',
         );
         if (lsRaw is String && lsRaw.isNotEmpty) {
-          String? token;
-          try {
-            final items = jsonDecode(lsRaw);
-            if (items is List) {
-              String? fallbackAccess;
-              String? fallbackPlain;
-              for (final item in items) {
-                final raw = item?.toString().trim() ?? '';
-                if (raw.isEmpty) continue;
-                try {
-                  final parsed = jsonDecode(raw);
-                  if (parsed is Map) {
-                    final rt = (parsed['refresh_token'] ?? parsed['refreshToken'])
-                        ?.toString()
-                        .trim();
-                    if (rt != null && rt.length >= 10) {
-                      token = rt;
-                      break;
-                    }
-                    final at = (parsed['access_token'] ?? parsed['accessToken'])
-                        ?.toString()
-                        .trim();
-                    if (fallbackAccess == null && at != null && at.length >= 10) {
-                      fallbackAccess = at;
-                    }
-                    continue;
-                  }
-                } catch (_) {}
-                if (fallbackPlain == null && raw.length >= 10) {
-                  fallbackPlain = raw;
-                }
-              }
-              token ??= fallbackAccess ?? fallbackPlain;
-            }
-          } catch (_) {}
+          final String? token = lsRaw.trim().isEmpty ? null : lsRaw.trim();
           if (token != null && token.isNotEmpty) {
             _finished = true;
             _timer?.cancel();
@@ -696,6 +662,11 @@ class _DriveWebLoginDialogState extends State<_DriveWebLoginDialog> {
                         javaScriptEnabled: true,
                         supportMultipleWindows: false,
                         userAgent: _desktopUserAgent,
+                        useWideViewPort: true,
+                        loadWithOverviewMode: true,
+                        supportZoom: true,
+                        builtInZoomControls: true,
+                        displayZoomControls: false,
                       ),
                       onWebViewCreated: (controller) =>
                           _controller = controller,
