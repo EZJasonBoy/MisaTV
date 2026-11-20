@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
@@ -312,6 +313,10 @@ class _DriveWebLoginDialogState extends State<_DriveWebLoginDialog> {
   String _lastValidatedCookie = '';
   bool? _lastValidatedOk;
   String _status = '正在打开网页…';
+  String? _guangyaDeviceCode;
+  String? _guangyaAuthUrl;
+  String? _guangyaUserCode;
+  bool _guangyaAuthLoading = false;
   String? _error;
 
   _WebLoginConfig get _config => widget.config;
@@ -319,6 +324,9 @@ class _DriveWebLoginDialogState extends State<_DriveWebLoginDialog> {
   @override
   void initState() {
     super.initState();
+    if (_config.provider == 'guangya') {
+      _startGuangyaDeviceAuth();
+    }
     _bootstrap();
   }
 
@@ -328,6 +336,60 @@ class _DriveWebLoginDialogState extends State<_DriveWebLoginDialog> {
     _timeoutTimer?.cancel();
     super.dispose();
   }
+  Future<void> _startGuangyaDeviceAuth() async {
+    if (_guangyaAuthLoading) return;
+    _guangyaAuthLoading = true;
+    final client = HttpClient();
+    try {
+      final req = await client.postUrl(
+        Uri.https('account.guangyapan.com', '/v1/auth/device/code'),
+      );
+      req.headers.set('content-type', 'application/json');
+      req.headers.set('referer', _config.scope);
+      req.headers.set('user-agent', _desktopUserAgent);
+      req.write(
+        jsonEncode({'scope': 'user', 'client_id': 'aMe-8VSlkrbQXpUR'}),
+      );
+      final resp = await req.close();
+      final body = await resp.transform(utf8.decoder).join();
+      if (!mounted || _finished) return;
+      if (resp.statusCode >= 200 && resp.statusCode < 300) {
+        final decoded = jsonDecode(body);
+        if (decoded is Map) {
+          final deviceCode = (decoded['device_code'] ?? '').toString().trim();
+          final userCode = (decoded['user_code'] ?? '').toString().trim();
+          final verifyComplete =
+              (decoded['verification_uri_complete'] ?? '').toString().trim();
+          final verifyUri =
+              (decoded['verification_uri'] ?? '').toString().trim();
+          final authUrl =
+              verifyComplete.isNotEmpty ? verifyComplete : verifyUri;
+          if (deviceCode.isNotEmpty && authUrl.isNotEmpty) {
+            setState(() {
+              _guangyaDeviceCode = deviceCode;
+              _guangyaUserCode = userCode.isNotEmpty ? userCode : null;
+              _guangyaAuthUrl = authUrl;
+              if (userCode.isNotEmpty) {
+                _status = '请完成光鸭官方授权（授权码：$userCode）';
+              }
+            });
+            final controller = _controller;
+            if (controller != null) {
+              await controller.loadUrl(
+                urlRequest: URLRequest(url: WebUri(authUrl)),
+              );
+            }
+          }
+        }
+      }
+    } catch (_) {
+      // Keep fallback loginUrl / localStorage scan if device auth request fails.
+    } finally {
+      client.close();
+      _guangyaAuthLoading = false;
+    }
+  }
+
 
   Future<void> _bootstrap() async {
     _timer = Timer.periodic(const Duration(milliseconds: 1500), (_) => _poll());
@@ -414,6 +476,55 @@ class _DriveWebLoginDialogState extends State<_DriveWebLoginDialog> {
     if (_polling || _finished || _expired) return;
     _polling = true;
     try {
+      if (_config.provider == 'guangya' &&
+          (_guangyaDeviceCode ?? '').isNotEmpty) {
+        final client = HttpClient();
+        try {
+          final req = await client.postUrl(
+            Uri.https('account.guangyapan.com', '/v1/auth/token'),
+          );
+          req.headers.set('content-type', 'application/json');
+          req.headers.set('referer', _config.scope);
+          req.headers.set('user-agent', _desktopUserAgent);
+          req.write(
+            jsonEncode({
+              'grant_type': 'urn:ietf:params:oauth:grant-type:device_code',
+              'device_code': _guangyaDeviceCode,
+              'client_id': 'aMe-8VSlkrbQXpUR',
+            }),
+          );
+          final resp = await req.close();
+          final body = await resp.transform(utf8.decoder).join();
+          if (!mounted || _finished) return;
+          if (resp.statusCode >= 200 && resp.statusCode < 300) {
+            final m = jsonDecode(body);
+            if (m is Map) {
+              final accessToken = m['access_token'];
+              if (accessToken is String && accessToken.isNotEmpty) {
+                final tokenJson = jsonEncode({
+                  'token_type': (m['token_type'] ?? 'Bearer').toString(),
+                  'access_token': accessToken,
+                  'refresh_token': (m['refresh_token'] ?? '').toString(),
+                  'sub': (m['sub'] ?? '').toString(),
+                });
+                _finished = true;
+                _timer?.cancel();
+                _timeoutTimer?.cancel();
+                if (!mounted) return;
+                final app = AppScope.of(context);
+                await app.saveDriveAccount('guangya', tokenJson);
+                if (!mounted) return;
+                Navigator.of(context).pop(true);
+                return;
+              }
+            }
+          }
+        } catch (_) {
+          // Ignore transient errors and fall through to localStorage scan.
+        } finally {
+          client.close();
+        }
+      }
       if (_config.useLocalStorageToken && _controller != null) {
         final lsRaw = await _controller!.evaluateJavascript(
           source: '''
@@ -631,7 +742,9 @@ class _DriveWebLoginDialogState extends State<_DriveWebLoginDialog> {
                         ),
                         const SizedBox(height: 2),
                         Text(
-                          _config.hint,
+                        (_guangyaUserCode ?? '').isNotEmpty
+                            ? '请完成光鸭官方授权（授权码：$_guangyaUserCode）'
+                            :                           _config.hint,
                           style: theme.textTheme.labelSmall?.copyWith(
                             color: theme.colorScheme.onSurface.withValues(
                               alpha: 0.55,
@@ -656,7 +769,7 @@ class _DriveWebLoginDialogState extends State<_DriveWebLoginDialog> {
                   Positioned.fill(
                     child: InAppWebView(
                       initialUrlRequest: URLRequest(
-                        url: WebUri(_config.loginUrl),
+                        url: WebUri(_guangyaAuthUrl ?? _config.loginUrl),
                       ),
                       initialSettings: InAppWebViewSettings(
                         javaScriptEnabled: true,
