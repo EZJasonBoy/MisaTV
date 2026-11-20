@@ -222,9 +222,9 @@ class SpiderHostPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             "quark" to listOf("Wex_quark_cookie"),
             "uc" to listOf("Wex_ucpan_cookie"),
             "baidu" to listOf("Wex_baidu_cookie"),
-            "115" to listOf("Wex_115_cookie"),
+            "115" to listOf("Wex_115_cookie", "115_cookie", "cookie_115", "pan115_cookie"),
             "thunder" to listOf("Wex_xunlei_token", "Wex_xunlei_cookie", "Wex_thunder_token", "Wex_thunder_cookie", "Wex_thunder_refresh_token", "thunder_token", "xunlei_token"),
-            "guangya" to listOf("Wex_guangya_token", "Wex_guangya_cookie", "Wex_guangya_refresh_token", "guangya_token", "guangya_refresh_token"),
+            "guangya" to listOf("Wex_guangya_token", "Wex_guangya_cookie", "Wex_guangya_refresh_token", "Wex_guangya_access_token", "Wex_guangyapan_token", "guangya_token", "guangya_refresh_token", "guangya_access_token", "guangyapan_token"),
         )
         try {
             val edit = ctx.getSharedPreferences("NewWexFnw_preferences", Context.MODE_PRIVATE).edit()
@@ -247,19 +247,23 @@ class SpiderHostPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             "quark" to listOf(".quarkcookie", "quark_cookie.txt"),
             "uc" to listOf(".ucpancookie", "uc_cookie.txt"),
             "baidu" to listOf(".baiducookie", "baidu_cookie.txt", "baidu.txt"),
-            "115" to listOf(".115cookie", "115_cookie.txt"),
+            "115" to listOf(".115cookie", "115_cookie.txt, "115.txt"),
             "thunder" to listOf(".xunleitoken", ".xunleicookie", "xunlei_token.txt", "xunlei_cookie.txt", "xunlei.txt", ".thundertoken", "thunder_token.txt"),
-            "guangya" to listOf(".guangyatoken", ".guangyacookie", "guangya_token.txt", "guangya_cookie.txt", "guangya.txt"),
+            "guangya" to listOf(".guangyatoken", ".guangyacookie", "guangya_token.txt", "guangya_cookie.txt", "guangya.txt", ".guangya", "guangyapan_token.txt"),
+            "bili" to listOf("bili_cookie.txt", ".bilicookie"),
         )
         val roots = mutableSetOf<File>()
         try {
             ctx.filesDir?.let { f ->
                 roots.add(File(f, "TV"))
                 roots.add(File(f, "files/TV"))
+                roots.add(File(f, "TVBox"))
             }
             roots.add(ctx.getDir("TV", Context.MODE_PRIVATE))
             roots.add(File(ctx.dataDir, "files/TV"))
+            roots.add(File(ctx.cacheDir, "TVBox"))
             roots.add(File(ctx.cacheDir, "files/TV"))
+            ctx.getExternalFilesDir(null)?.let { roots.add(File(it, "TVBox")) }
             ctx.getExternalFilesDir(null)?.let { roots.add(File(it, "TV")) }
             if (driveCacheDir.isNotEmpty()) roots.add(File(driveCacheDir, "files/TV"))
         } catch (_: Throwable) {}
@@ -289,6 +293,7 @@ class SpiderHostPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 "baidu" to "baidu.txt",
                 "thunder" to "xunlei_cookie.txt",
                 "guangya" to "guangya_token.txt",
+            "115" to "115.txt",
             )
             for ((provider, name) in names) {
                 val value = driveCookies[provider].orEmpty()
