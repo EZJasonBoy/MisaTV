@@ -50,6 +50,11 @@ AppState ──> SourceService ──> CmsSource      (type 0 / 1 / 4，MoviePar
    所以只在外部播放器上暴露。
 2. **加固壳播放必须让 JVM 常驻**（`SpiderHost --hold`）。壳返回的播放地址指向该 JVM 自己的
    `127.0.0.1:<port>`，一次性进程退出后地址立即失效。
+3. **网盘 CDN 有跨度限速**：夸克 / UC / 百度直链发 `bytes=0-` 或超大跨度会被压到约 0.1 MB/s。
+   `/play` 对这三类地址把 Range 夹到首段 8MB、续段 32MB；这是能起播的前提，不能删。
+   如果直链能初始化但持续低速/缓冲（实测单连接只有 1~2 MB/s），播放页的
+   `DriveSlowSwitchPolicy` 会在 8 秒宽限期后采样，连续 4 个样本中至少 3 个 buffering
+   且 3 个低于 2.5 MB/s 时，切到壳内 `/chunk` 取流，并从当前进度续播。
 
 ## 独立播放器窗口
 
@@ -199,6 +204,17 @@ Flutter 3.47 在 Windows 默认走 Impeller OpenGLESSDF 后端，本项目的圆
 图片解码同时收敛：`imageCache` 上限 48MB / 220 张（`main.dart`），海报 `cacheWidth: 320`、
 详情背景 960、收藏与直播台标 200 / 128。首页背景只用一层对角渐变，用 `CustomPainter`
 （`AppBackdropPainter`）画在内容之下的同一绘制层，不用溢出视口的 `Stack`。
+
+## Windows 发布包的 VC++ 运行库
+
+`windows/runner/CMakeLists.txt` 在构建后把 `msvcp140.dll` / `vcruntime140.dll` /
+`vcruntime140_1.dll` 复制到 exe 同目录。来源优先取编译器对应的
+`VC/Redist/MSVC/<版本>/x64/Microsoft.VC*.CRT`，缺失时回退到工具集自带的
+`bin/Hostx64/x64`；不要从 JRE 目录取旧版 `msvcp140.dll`。
+
+Flutter 与各插件 DLL 都以 `/MD` 链接。用户机没装 vc_redist 时，缺这三个 DLL 会在
+窗口创建前直接闪退；Windows 优先从 exe 目录加载，所以随包放一份即可，不需要管理员安装。
+CI 的打包步骤会断言这三个文件存在，缺失直接失败。
 
 ## Windows 关窗退出
 
@@ -484,6 +500,29 @@ JS / PY 也各有自己的执行器池。**不要把这两个层次混为一谈*
    蜘蛛不设限，这 1.2 秒只是让整轮搜索无条件晚 1.2 秒，用户感受就是「点了没反应」。
 2. **蜘蛛超时用 `(timeout + 15).clamp(20, 45)`**。以前是 `timeout + 35`（默认 50s），
    一个卡死源能把整轮搜索拖到 50 秒以上。实测日志里最慢一次 32.5s，45s 上限足够。
+
+### 搜索轮次预算与 JAR 排队
+
+搜索有 **35 秒整轮预算**（`SearchService.roundBudget`，默认值）。到点先收起界面并保留已返回
+结果，同时把本轮标记为 `timedOut`，不再等剩下的慢源。原因是 serve host 是单线程
+顺序执行的：100 个源一起派发时，UI 超时后排在后面的 JAR 调用仍会继续跑几分钟，
+把 JVM、磁盘和缓存目录占满，下一次搜索 / 播放也会跟着慢。
+
+取消不能只靠 UI 的布尔位：
+
+- 每个搜索调用通过 `runZoned` 在 Zone 里带一个轮次号（`search_round.dart`）；
+- `JarSpiderService` 在起进程 / 发 RPC 前比对当前轮次，过期直接抛
+  `SearchCancelledException`，不启动新的 JVM；日志层也不把它记成源站失败；
+- 搜索 JAR 调用的单次等待上限按 45 秒收口（`_effectiveTimeout`），避免一个
+  native/加固壳调用把 serve host 占住 120 秒以上；
+- 一次性 JVM 有全局 4 只的闸门（`_oneShotMax`），失效源回退一次性进程时不再
+  同时起几十只 JVM。
+
+打开详情 / 播放时，UI 会调用 `SearchService.cancelActiveRound()`：结束本轮搜索，
+并杀掉仍被搜索占用的 serve host（播放 pin 住的 host 不动），把 JVM 让给交互操作。
+否则用户点开结果后，详情 / 取链仍排在上百个搜索源后面，表现为「播放加载慢」。
+
+取消只影响搜索 Zone 内的调用：首页、详情、播放仍使用原来的长超时。
 
 ## 结构化搜索语法
 

@@ -89,6 +89,12 @@ jobs:
         run: |
           $src = "build/windows/x64/runner/Release"
           if (-not (Test-Path $src)) { throw "构建产物不存在：$src" }
+          # App-local VC++ runtime: without these a clean Windows install that
+          # has no vc_redist crashes at startup before Flutter creates a window.
+          foreach ($dll in @('msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll')) {
+            $path = Join-Path $src $dll
+            if (-not (Test-Path $path)) { throw "缺少 VC++ 运行库：$path（未装 vc_redist 的用户会闪退）" }
+          }
           $stage = Join-Path $env:RUNNER_TEMP "misatv-win"
           Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force -Path $stage | Out-Null

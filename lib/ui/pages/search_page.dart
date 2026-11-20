@@ -524,6 +524,7 @@ class _SearchPageState extends State<SearchPage> {
       done: progress.done,
       total: progress.total,
       finished: progress.finished,
+      timedOut: progress.timedOut,
       sourceItems: {
         for (final entry in progress.sourceItems.entries)
           entry.key: keep(entry.value),
@@ -967,7 +968,8 @@ class _ProgressPanel extends StatelessWidget {
                       ? '正在搜索「$keyword」 · ${progress.done}/${progress.total}$filterLabel'
                       : '「$keyword」找到 $visibleCount 条结果$filterLabel'
                             '${progress.filterSummary.isEmpty ? '' : ' · ${progress.filterSummary}'}'
-                            '${hidden > 0 ? ' · 已屏蔽 $hidden 条' : ''}',
+                            '${hidden > 0 ? ' · 已屏蔽 $hidden 条' : ''}'
+                            '${progress.timedOut ? ' · 部分源未返回' : ''}',
                   style: theme.textTheme.bodySmall?.copyWith(
                     fontWeight: FontWeight.w600,
                   ),

@@ -763,6 +763,12 @@ class _SocketReader {
     if (wake != null && !wake.isCompleted) wake.complete();
   }
 
+  /// 等到下一次「有新数据 / EOF / 错误」。
+  ///
+  /// [_wakeUp] 在没有等待者时会直接丢弃信号（`_wake` 被置空）。因此调用方
+  /// 只能在自己**确实需要更多数据**时才调用这里；缓冲里已有的数据必须先处理。
+  /// `readExact` / `readUntil` 是「不够才等」，没有问题；`pipeTo` 必须按
+  /// 「先取后等」的循环写，否则会丢唤醒（见该方法注释）。
   Future<void> _wait() {
     if (_done) return Future.value();
     final wake = _wake;
@@ -906,22 +912,26 @@ class _SocketReader {
     Socket destination, {
     bool closeDestination = true,
   }) async {
-    if (_buffer.isNotEmpty) {
-      destination.add(Uint8List.fromList(_buffer));
-      _buffer.clear();
-      try {
-        await destination.flush();
-      } catch (_) {}
-    }
-    while (!_done) {
-      await _wait();
+    // ★ 必须先取缓冲、再等下一条数据，顺序不能反。
+    //
+    // `_wakeUp()` 只在恰好有等待者时传递信号：按「等 → 取」写的话，数据若在
+    // `destination.flush()` 期间到达，`_wakeUp()` 会因 `_wake == null` 被丢弃，
+    // 随后的 `_wait()` 又看不到缓冲里已有的这段数据，只能等对端再发下一次 ——
+    // 两边互等，隧道永久停住。HTTPS 的表现就是 CONNECT 回 200 后 TLS 握手卡死。
+    //
+    // 同时这也保证 EOF 前的最后一包不会丢：`while (!_done)` 的老写法在 flush
+    // 期间收到 `onDone` 会直接退出，缓冲里那一段再没机会发出去。
+    while (true) {
       if (_buffer.isNotEmpty) {
         destination.add(Uint8List.fromList(_buffer));
         _buffer.clear();
         try {
           await destination.flush();
         } catch (_) {}
+        continue;
       }
+      if (_done) break;
+      await _wait();
     }
     if (_error != null) {
       try {

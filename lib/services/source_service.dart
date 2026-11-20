@@ -10,6 +10,7 @@ import 'jar_spider_service.dart';
 import 'js_spider_service.dart';
 import 'kazumi/kazumi_source.dart';
 import 'py_spider_service.dart';
+import 'search_round.dart';
 import 'source/source_adapter.dart';
 import 'source/source_adapters.dart';
 
@@ -48,6 +49,12 @@ class SourceService {
     await jar.shutdown();
   }
 
+  /// 新一轮聚合搜索开始：让 JAR 蜘蛛作废旧轮次排队中的调用。
+  void beginSearchRound(int round) => jar.beginSearchRound(round);
+
+  /// 搜索取消 / 时间预算到期：只作废指定的轮次。
+  void cancelSearchRound(int round) => jar.cancelSearchRound(round);
+
   /// 统一记录一次源调用（类型 / 耗时 / 结果 / 失败堆栈），便于复盘。
   Future<T> _logged<T>(
     String op,
@@ -66,13 +73,16 @@ class SourceService {
       );
       return value;
     } catch (e, s) {
-      AppLog.e(
-        'source',
-        '$op key=${site.key} type=${site.type} ${note.isEmpty ? '' : '$note '}'
-            '${sw.elapsedMilliseconds}ms api=${redactUrl(site.api)}',
-        e,
-        s,
-      );
+      // 搜索轮次过期是预期行为，不该在日志里伪装成源站失败。
+      if (e is! SearchCancelledException) {
+        AppLog.e(
+          'source',
+          '$op key=${site.key} type=${site.type} ${note.isEmpty ? '' : '$note '}'
+              '${sw.elapsedMilliseconds}ms api=${redactUrl(site.api)}',
+          e,
+          s,
+        );
+      }
       rethrow;
     }
   }

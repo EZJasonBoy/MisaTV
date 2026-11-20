@@ -37,6 +37,7 @@ import '../../services/torrent/magnet.dart';
 import '../../services/boss_key/boss_key_service.dart';
 import '../../services/artwork/artwork_service.dart';
 import '../../services/player/auto_line_switch.dart';
+import '../../services/player/drive_slow_switch.dart';
 import '../../services/player/network_speed_smoother.dart';
 import '../../services/player/external_players.dart';
 import '../../services/player/skip_segments.dart';
@@ -238,6 +239,12 @@ class _PlayerPageState extends State<PlayerPage>
   /// Cues（实测 25 秒只读到 142MB / 6422MB 后超时）；而同一份数据经壳的
   /// `/chunk` 是秒开。这条重试只在直链超时后走一次，避免死循环。
   int _serveRetriedEpisode = -1;
+
+  /// 直链持续低速的采样计时器与防重入标记。
+  Timer? _driveSlowTimer;
+  int _driveSlowEpisode = -1;
+  int _driveSlowSwitchedEpisode = -1;
+  bool _driveSwitchInFlight = false;
 
   /// 已经确认「网盘直链读不出尾部索引」的线路（`站点|线路`）。
   ///
@@ -612,6 +619,8 @@ class _PlayerPageState extends State<PlayerPage>
       _autoSearchTimer?.cancel();
       _autoSearchTimer = null;
     }
+    _driveSlowTimer?.cancel();
+    _driveSlowEpisode = -1;
     if (index != _index) {
       _directRetriedEpisode = -1;
       _serveRetriedEpisode = -1;
@@ -978,6 +987,14 @@ class _PlayerPageState extends State<PlayerPage>
       });
       _syncSleepInhibitor();
       _syncAudioTracks(controller);
+      if (!bypassRelay &&
+          PlayPageUnwrap.isRangeThrottledDriveCdn(target.url)) {
+        _watchDriveThroughput(
+          index: index,
+          target: target,
+          startMs: appliedStart,
+        );
+      }
       _applyVideoAspect(controller);
       if (!_ephemeral) {
         await app.recordHistory(
@@ -1284,6 +1301,129 @@ class _PlayerPageState extends State<PlayerPage>
     );
   }
 
+  /// 网盘直链能初始化，但持续低速/缓冲时改用壳内 `/chunk`。
+  ///
+  /// 直链超时分支只在「完全打不开」时触发；这里补的是「能播但一直缓冲」：
+  /// 夸克/UC/百度的部分 CDN 单连接只有 1~2 MB/s，5.2GB 的 4K mkv 会一直转圈。
+  /// 采样 `PlaySpeedMeter.totalBytes`，宽限期 8 秒后连续 4 个样本里至少 3 个
+  /// buffering 且 3 个低于 2.5 MB/s，才换路，避免起播/seek 被误判。
+  void _watchDriveThroughput({
+    required int index,
+    required PlayResult target,
+    required int startMs,
+  }) {
+    _driveSlowTimer?.cancel();
+    _driveSlowEpisode = index;
+    if (_driveSlowSwitchedEpisode == index ||
+        !_site.isJarSpider ||
+        !PlayPageUnwrap.isRangeThrottledDriveCdn(target.url)) {
+      return;
+    }
+    AppLog.i(
+      'player',
+      '网盘直链开始监测下行 index=$index url=${redactUrl(target.url)}',
+    );
+    final started = DateTime.now();
+    var lastAt = started;
+    var lastBytes = PlaySpeedMeter.instance.totalBytes;
+    var samples = 0;
+    var stalls = 0;
+    var lowSpeed = 0;
+
+    _driveSlowTimer = Timer.periodic(
+      DriveSlowSwitchPolicy.sampleInterval,
+      (timer) {
+        if (!mounted ||
+            _index != index ||
+            _driveSlowEpisode != index ||
+            _error.isNotEmpty ||
+            _handedToExternalPlayer) {
+          timer.cancel();
+          return;
+        }
+        final now = DateTime.now();
+        if (now.difference(started) < DriveSlowSwitchPolicy.warmup) {
+          lastAt = now;
+          lastBytes = PlaySpeedMeter.instance.totalBytes;
+          return;
+        }
+        final bytes = PlaySpeedMeter.instance.totalBytes;
+        final elapsedMs = now.difference(lastAt).inMilliseconds;
+        final speed = elapsedMs > 0
+            ? (bytes - lastBytes) * 1000 / elapsedMs
+            : 0.0;
+        lastAt = now;
+        lastBytes = bytes;
+        // 暂停时不采样；buffering 时 _playing 可能仍为 true。
+        if (!_playing && !_buffering) return;
+        samples++;
+        if (_buffering) stalls++;
+        if (speed < DriveSlowSwitchPolicy.lowSpeedBytesPerSecond) lowSpeed++;
+        if (DriveSlowSwitchPolicy.shouldSwitch(
+          samples: samples,
+          stallSamples: stalls,
+          lowSpeedSamples: lowSpeed,
+          isDriveCdn: true,
+          isJarSpider: _site.isJarSpider,
+          alreadyRetried: _driveSlowSwitchedEpisode == index,
+        )) {
+          timer.cancel();
+          unawaited(
+            _switchDriveToServe(
+              index: index,
+              target: target,
+              startMs: startMs,
+            ),
+          );
+        }
+      },
+    );
+  }
+
+  Future<void> _switchDriveToServe({
+    required int index,
+    required PlayResult target,
+    required int startMs,
+  }) async {
+    if (_driveSwitchInFlight ||
+        _driveSlowSwitchedEpisode == index ||
+        !_site.isJarSpider ||
+        !PlayPageUnwrap.isRangeThrottledDriveCdn(target.url) ||
+        index < 0 ||
+        index >= _episodes.length) {
+      return;
+    }
+    _driveSwitchInFlight = true;
+    _driveSlowSwitchedEpisode = index;
+    _serveRetriedEpisode = index;
+    _driveServePreferred.add('${_site.key}|$_flag');
+    final resume = _controller?.value.position.inMilliseconds ?? startMs;
+    AppLog.w(
+      'player',
+      '网盘直链持续低速，改用壳内取流 index=$index resume=${resume}ms '
+          'url=${redactUrl(target.url)}',
+    );
+    _toast('网盘直链速度过慢，正在改用壳内取流');
+    try {
+      final again = await _app.sourceService.replayViaServe(
+        site: _site,
+        config: _app.config ?? const SiteConfig(),
+        flag: _flag,
+        rawUrl: _episodes[index].url,
+      );
+      if (!mounted || _index != index) return;
+      if (again == null || !again.playable) {
+        _driveServePreferred.remove('${_site.key}|$_flag');
+        AppLog.w('player', '壳内取流未取到，保持当前直链 index=$index');
+        _toast('壳内取流未取到，继续使用当前直链');
+        return;
+      }
+      unawaited(_openEpisode(index: index, play: again, startMs: resume));
+    } finally {
+      _driveSwitchInFlight = false;
+    }
+  }
+
   Future<PlayResult?> _resolve(int index) async {
     if (index < 0 || index >= _episodes.length) return null;
     final app = _app;
@@ -1462,6 +1602,8 @@ class _PlayerPageState extends State<PlayerPage>
       _autoTriedSources.add(candidate.site.key);
       VodDetail? detail;
       try {
+        // 自动换源同样优先于后台搜索：先释放搜索占用的 JAR host。
+        app.searchService.cancelActiveRound();
         detail = await app.sourceService.detail(
           candidate.site,
           candidate.item.id,
@@ -1546,6 +1688,7 @@ class _PlayerPageState extends State<PlayerPage>
       _flag = flag;
       _episodes = episodes;
       _index = index;
+      _driveSlowSwitchedEpisode = -1;
       _resolving = true;
       _buffering = true;
       _playing = false;
@@ -1662,6 +1805,7 @@ class _PlayerPageState extends State<PlayerPage>
       _directRetriedEpisode = -1;
       _mediaRetriedEpisode = -1;
       _serveRetriedEpisode = -1;
+      _driveSlowSwitchedEpisode = -1;
     });
     _toast('已切换到线路「${flag.isEmpty ? '默认线路' : flag}」');
     await _openEpisode(index: index);
@@ -2009,6 +2153,8 @@ class _PlayerPageState extends State<PlayerPage>
     _hideTimer?.cancel();
     _saveTimer?.cancel();
     _detailsTimer?.cancel();
+    _driveSlowTimer?.cancel();
+    _driveSlowTimer = null;
     _cancelPendingSkipPick();
     final autoSearchDone = _autoSearchDone;
     if (autoSearchDone != null && !autoSearchDone.isCompleted) {

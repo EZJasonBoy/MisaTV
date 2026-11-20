@@ -90,6 +90,10 @@ public class SpiderHost {
   }
 
   public static void main(String[] args) {
+    // 站源载荷（尤其加固壳）可能自己调用 System.exit 杀死宿主。
+    // 在加载任何 spider jar 之前安装守卫：宿主自己的退出照常放行，
+    // 载荷发起的退出只让本次 RPC 失败，进程继续服务后续请求。
+    ExitGuard.install();
     ensureHostProxy();
     // ★ stdout 专供「结果/信封」：蜘蛛自己的 System.out.println 会与结果/信封共用同一管道，
     //   打印碎片（不带换行的半行）+ 信封 → 整行 JSON 解析失败 → 常驻池侧挂起到超时
@@ -139,6 +143,104 @@ public class SpiderHost {
       code = 1;
     }
     System.exit(code);
+  }
+
+  /**
+   * 拦截站源载荷自己发起的 {@link System#exit(int)}。
+   *
+   * <p>加固壳/转换 jar 里偶有 {@code System.exit(1)}（或第三方库的退出调用）。
+   * 进程一死，常驻池里的 Cookie、解包产物和取流地址全部丢失，用户侧表现为
+   * 「详情/播放突然失败，重开又要重新初始化」。这里用只关心退出的
+   * SecurityManager：宿主类加载器发起的退出放行，载荷类加载器发起的退出
+   * 记录调用栈并抛 SecurityException，让本次 RPC 失败但宿主继续活着。
+   *
+   * <p>JDK 17+ 需要 {@code -Djava.security.manager=allow}（见 Dart 侧
+   * {@code jar_spider.dart} 的 JVM 参数）。安装失败只记一行日志，不影响启动。
+   * {@code Runtime.halt()} 不受 SecurityManager 管辖，拦不住。
+   */
+  @SuppressWarnings("removal")
+  static final class ExitGuard {
+    private static volatile boolean installed;
+
+    private ExitGuard() {
+    }
+
+    static void install() {
+      if (installed) return;
+      try {
+        if (System.getSecurityManager() != null) {
+          installed = true;
+          return;
+        }
+        System.setSecurityManager(new Guard());
+        installed = true;
+        System.err.println("[ExitGuard] installed");
+      } catch (Throwable t) {
+        System.err.println("[ExitGuard] install skipped: " + t);
+      }
+    }
+
+    static final class Guard extends SecurityManager {
+      @Override public void checkPermission(java.security.Permission permission) {
+        // 只关心退出；其它权限一律放行，避免打断载荷的反射/文件访问。
+      }
+
+      @Override public void checkPermission(java.security.Permission permission, Object context) {
+      }
+
+      @Override public void checkExit(int status) {
+        Class<?>[] context = getClassContext();
+        Class<?> caller = callerClassOfExit(context);
+        if (isHost(caller)) return;
+        String name = caller == null ? "" : caller.getName();
+        report(status, name, context);
+        throw new SecurityException(
+            "站源载荷请求退出 JVM（exit=" + status + "，来源 " + name + "），已被拦截");
+      }
+    }
+
+    /** 跳过 JDK 与守卫自身，返回真正发起退出的类。 */
+    static Class<?> callerClassOfExit(Class<?>[] context) {
+      if (context == null) return null;
+      for (Class<?> frame : context) {
+        if (frame == null) continue;
+        String name = frame.getName();
+        if (name.startsWith("java.lang.") || name.startsWith("java.security.")) continue;
+        if (name.startsWith("SpiderHost$ExitGuard") || name.equals("SpiderHost")) continue;
+        return frame;
+      }
+      return null;
+    }
+
+    /**
+     * 宿主判定看类加载器，不看包名：载荷壳类可能伪装成
+     * {@code com.github.catvod.*}，按前缀放行会漏判。
+     */
+    static boolean isHost(Class<?> caller) {
+      if (caller == null) return true;
+      ClassLoader own = ExitGuard.class.getClassLoader();
+      ClassLoader loader = caller.getClassLoader();
+      if (loader == null) return own == null;
+      return loader == own;
+    }
+
+    private static void report(int status, String caller, Class<?>[] context) {
+      try {
+        System.err.println("[ExitGuard] blocked System.exit(" + status + ") from " + caller
+            + " thread=" + Thread.currentThread().getName());
+        int printed = 0;
+        for (Class<?> frame : context) {
+          if (frame == null) continue;
+          String name = frame.getName();
+          if (name.startsWith("java.lang.") || name.startsWith("java.security.")) continue;
+          System.err.println("[ExitGuard]   at " + name);
+          if (++printed >= 8) break;
+        }
+        System.err.flush();
+      } catch (Throwable ignored) {
+        // 日志失败不能影响拦截本身。
+      }
+    }
   }
 
   /**

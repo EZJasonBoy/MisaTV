@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../../core/logging/app_log.dart';
 import '../../core/net/url_utils.dart';
+import '../../core/platform/process_job.dart';
 import '../../core/utils/file_url.dart';
 import '../../models/site_config.dart';
 import '../../models/vod.dart';
@@ -525,6 +526,8 @@ class _PyPlayHost {
       if (host._errors.length > 40) host._errors.removeAt(0);
       host._errors.add(line);
     }, onError: (Object _) {});
+    // 监听器挂好后再收养，避免 MethodChannel 调用期间管道数据积压。
+    await ProcessJob.adopt(process.pid);
     return host;
   }
 

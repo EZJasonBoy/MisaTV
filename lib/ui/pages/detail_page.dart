@@ -171,6 +171,9 @@ class _DetailPageState extends State<DetailPage> {
       _error = null;
     });
     try {
+      // 用户已经选中条目：先结束仍在跑的聚合搜索，释放被搜索占用的 JAR host，
+      // 否则详情 / 取链会排在上百个搜索源后面，表现为点开详情几十秒没反应。
+      app.searchService.cancelActiveRound();
       final detail = await app.sourceService.detail(
         site,
         widget.item.id,
