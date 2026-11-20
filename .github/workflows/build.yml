@@ -36,7 +36,7 @@ jobs:
       - name: 环境信息
         run: flutter --version
 
-            - name: 拉取依赖
+      - name: 拉取依赖
         run: flutter pub get
 
       - name: Setup NuGet
