@@ -84,6 +84,14 @@ jobs:
         uses: nuget/setup-nuget@v2
         
       - name: 构建 Windows Release
+      - name: Setup NuGet
+        uses: nuget/setup-nuget@v2
+
+      - name: Verify NuGet
+        shell: pwsh
+        run: |
+          where.exe nuget
+          nuget help | Select-Object -First 2
         run: flutter build windows --release
 
       - name: 打包（排除 userdata）
