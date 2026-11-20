@@ -1834,8 +1834,13 @@ class LocalRelay {
   }) async {
     final res = request.response;
     final rawQuery = request.uri.query;
+    final reqPath = request.uri.path;
+    final targetPath = reqPath.startsWith('/proxy/') &&
+            int.tryParse(reqPath.substring('/proxy/'.length)) == null
+        ? reqPath
+        : '/proxy';
     final target =
-        'http://127.0.0.1:$port/proxy'
+        'http://127.0.0.1:$port$targetPath'
         '${rawQuery.isEmpty ? '' : '?$rawQuery'}';
     final headers = <String, String>{};
     for (final name in const [
