@@ -4067,6 +4067,9 @@ class JarSpiderService {
             (e.message.contains('已断开') || e.message.contains('已退出'))) {
           continue;
         }
+        if (e.message.contains('已断开') || e.message.contains('已退出')) {
+          rethrow;
+        }
         throw SourceException('常驻蜘蛛调用失败：${e.message}');
       }
       _touchServe(key);
