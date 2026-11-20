@@ -146,7 +146,7 @@ class SpiderEnv {
     final lines = <String>[
       for (final entry in _wexPrefKeys.entries)
         if ((cookies[entry.key] ?? '').isNotEmpty) for (final prefKey in entry.value)
-          '$_wexPrefsName\t${prefKey}\t${_clean(cookies[entry.key]!)}',
+          '$_wexPrefsName\t$prefKey\t${_clean(cookies[entry.key]!)}',
       for (final entry in seed.entries) '$_wexPrefsName\t${entry.key}\t${_clean(entry.value)}',
       // 桌面端没有 Go 代理（ARM32 + Android root 场景），强制 Java 多线程取流；
       // 否则原画线路必报「Go多线程启动失败」。
