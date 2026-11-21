@@ -70,7 +70,7 @@ class SpiderHostPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     @Volatile private var driveCookies = mapOf<String, String>()
     @Volatile private var driveSeed = mapOf<String, String>()
     @Volatile private var driveCacheDir = ""
-
+        @Volatile private var managedDriveProviders = setOf<String>()
     // 壳自带的「宿主代理」本地端口（playerContent 返回的 127.0.0.1 地址要改写到这个端口）
     @Volatile private var proxyPort = 0
 
@@ -234,7 +234,7 @@ class SpiderHostPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             for ((provider, keys) in prefKeys) {
                 val value = driveCookies[provider].orEmpty().ifEmpty { if (provider == "aliyun") driveCookies["ali"].orEmpty() else "" }
                 for (prefKey in keys) {
-                if (value.isEmpty()) edit.remove(prefKey) else edit.putString(prefKey, formatWexPrefValue(prefKey, value))
+                if (value.isEmpty()) { if (managedDriveProviders.contains(provider)) edit.remove(prefKey) } else edit.putString(prefKey, formatWexPrefValue(prefKey, value))
                 }
             }
             edit.putString("pan.thread_proxy_mode", "java")
@@ -277,7 +277,7 @@ class SpiderHostPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 try {
                     val file = File(root, name)
                     if (value.isEmpty()) {
-                        file.delete()
+                        if (managedDriveProviders.contains(provider)) file.delete()
                     } else {
                         root.mkdirs()
                         file.writeText(value)
@@ -300,13 +300,13 @@ for (dir in dirs) {
             val value = driveCookies[provider].orEmpty()
             val file = File(dir, name)
             if (value.isEmpty()) {
-                file.delete()
+               if (managedDriveProviders.contains(provider)) file.delete()
                 return@runCatching
             }
-            val obj = JSONObject()
-                .put("cookie", value)
-                .put("nickname", "MisaTV")
-                .put("member_type", "1")
+            val obj = if (file.exists()) runCatching { JSONObject(file.readText()) }.getOrElse { JSONObject() } else JSONObject()
+                obj.put("cookie", value)
+                if (obj.optString("nickname").isEmpty()) obj.put("nickname", "MisaTV")
+                if (obj.optString("member_type").isEmpty()) obj.put("member_type", "1"); if (provider == "baidu" && driveSeed["baidu_user_id"].orEmpty().isNotEmpty()) obj.put("userId", driveSeed["baidu_user_id"].orEmpty())
             file.writeText(obj.toString())
         }
     }
@@ -315,7 +315,7 @@ for (dir in dirs) {
             val raw = driveCookies[provider].orEmpty().trim()
             val file = File(dir, fileName)
             if (raw.isEmpty()) {
-                file.delete()
+               if (managedDriveProviders.contains(provider)) file.delete()
                 return@runCatching
             }
             var tokenType = "Bearer"
@@ -358,7 +358,7 @@ for (dir in dirs) {
     }
 }
 
-        } catch (_: Throwable) {}
+        } catch (_: Throwable) {}; managedDriveProviders = driveCookies.filterValues { it.isNotEmpty() }.keys
     }
 
     private fun formatWexPrefValue(prefKey: String, raw: String): String {
@@ -415,7 +415,6 @@ for (dir in dirs) {
                 } else {
                     refreshToken = trimmed
                 }
-               if (expireTime <= 0L && accessToken.isNotEmpty()) expireTime = System.currentTimeMillis() + 7200_000L
                 JSONObject().apply {
                     put("accessToken", accessToken)
                     put("refreshToken", refreshToken)
