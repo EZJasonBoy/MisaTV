@@ -186,7 +186,7 @@ return jsonEncode({
     final peerId = pick('peerId', 'peer_id');
    final resp = (m?['token_resp'] is Map) ? (m!['token_resp'] as Map).map((k, v) => MapEntry('$k', v)) : m;
    String pickResp(String a, String b, [String fallback = '']) { final v = '${resp?[a] ?? resp?[b] ?? ''}'.trim(); return v.isNotEmpty ? v : fallback; }
-   final accessToken = resp == null ? '' : pickResp('accessToken', 'access_token'); final rawUserId = pickResp('userId', 'user_id'); final userId = rawUserId.isNotEmpty ? rawUserId : pickResp('sub', 'sub'); int expireTime = 0; final rawExpire = num.tryParse('${resp?['expireTime'] ?? resp?['expires_end'] ?? 0}')?.toInt() ?? 0; if (rawExpire > 0) { expireTime = rawExpire < 1000000000000 ? rawExpire * 1000 : rawExpire; } else { final expiresIn = num.tryParse('${resp?['expires_in'] ?? 0}')?.toInt() ?? 0; if (expiresIn > 0) expireTime = DateTime.now().millisecondsSinceEpoch + expiresIn * 1000; } if (expireTime <= 0 && accessToken.isNotEmpty) expireTime = DateTime.now().millisecondsSinceEpoch + 7200 * 1000;
+   final accessToken = resp == null ? '' : pickResp('accessToken', 'access_token'); final rawUserId = pickResp('userId', 'user_id'); final userId = rawUserId.isNotEmpty ? rawUserId : pickResp('sub', 'sub'); int expireTime = 0; final rawExpire = num.tryParse('${resp?['expireTime'] ?? resp?['expires_end'] ?? 0}')?.toInt() ?? 0; if (rawExpire > 0) { expireTime = rawExpire < 1000000000000 ? rawExpire * 1000 : rawExpire; } else { final expiresIn = num.tryParse('${resp?['expires_in'] ?? 0}')?.toInt() ?? 0; if (expiresIn > 0) expireTime = DateTime.now().millisecondsSinceEpoch + expiresIn * 1000; }
     return jsonEncode({
       'accessToken': accessToken,
       'refreshToken': resp == null ? trimmed : pickResp('refreshToken', 'refresh_token'),
@@ -237,24 +237,30 @@ return jsonEncode({
       // quark / uc 的登录判定是「三字段均非空」→ 保留旧文件里的真实昵称/会员态，缺省占位。
       var nickname = 'MisaTV';
       var memberType = '1';
-      if (entry.key == 'quark' || entry.key == 'uc') {
-        try {
+      var userId = '';
+      var username = '';
+      try {
           final old = jsonDecode(file.readAsStringSync());
           if (old is Map) {
             final n = '${old['nickname'] ?? ''}'.trim();
             final t = '${old['member_type'] ?? ''}'.trim();
             if (n.isNotEmpty) nickname = n;
             if (t.isNotEmpty) memberType = t;
+            final u = '${old['userId'] ?? ''}'.trim();
+            final un = '${old['username'] ?? ''}'.trim();
+            if (u.isNotEmpty) userId = u;
+            if (un.isNotEmpty) username = un;
           }
         } catch (_) {
           // 无旧文件 / 内容损坏 → 用占位
-        }
       }
       final body = <String, dynamic>{'cookie': value};
       if (entry.key == 'quark' || entry.key == 'uc') {
         body['nickname'] = nickname;
         body['member_type'] = memberType;
       }
+      if (userId.isNotEmpty) body['userId'] = userId;
+      if (username.isNotEmpty) body['username'] = username;
       dir.createSync(recursive: true);
       file.writeAsStringSync(jsonEncode(body), flush: true);
     }
