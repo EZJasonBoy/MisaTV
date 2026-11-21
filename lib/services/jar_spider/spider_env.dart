@@ -70,6 +70,7 @@ class SpiderEnv {
     'quark': 'quark_cookie.txt',
     'uc': 'uc_cookie.txt',
     'baidu': 'baidu.txt',
+    'aliyun': 'aliyun.txt',
   };
 
   /// 同步一次（文件都很小，每次调用都重写；内容未变时写入是幂等的）。
@@ -225,7 +226,7 @@ return jsonEncode({
     final dir = Directory(p.join(tmpDir, 'tvbox-ext', 'TVBox'));
     for (final entry in _pizazzFiles.entries) {
       final file = File(p.join(dir.path, entry.value));
-      final value = cookies[entry.key] ?? '';
+      final value = (cookies[entry.key] ?? (entry.key == 'aliyun' ? cookies['ali'] : null) ?? '');
       if (value.isEmpty) {
         _delete(file);
         continue;

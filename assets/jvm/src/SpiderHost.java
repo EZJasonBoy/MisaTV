@@ -1105,8 +1105,10 @@ public class SpiderHost {
           .invoke(sp, r.length > 0 ? r[0] : "", r.length > 1 ? r[1] : "1", true, extend);
     }
     if ("detailContent".equals(method)) {
+      String rawId = r.length > 0 ? r[0] : "";
+      java.util.List<String> ids = (r.length > 1) ? Arrays.asList(r) : (rawId.contains("$$$") || rawId.contains("://") || rawId.startsWith("{")) ? java.util.Collections.singletonList(rawId) : Arrays.asList(rawId.split(","));
       return (String) sp.getClass().getMethod("detailContent", List.class)
-          .invoke(sp, Arrays.asList((r.length > 0 ? r[0] : "").split(",")));
+          .invoke(sp, ids);
     }
     if ("searchContent".equals(method)) {
       String wd = r.length > 0 ? r[0] : "";

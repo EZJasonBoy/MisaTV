@@ -232,7 +232,7 @@ class SpiderHostPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         try {
             val edit = ctx.getSharedPreferences("NewWexFnw_preferences", Context.MODE_PRIVATE).edit()
             for ((provider, keys) in prefKeys) {
-                val value = driveCookies[provider].orEmpty()
+                val value = driveCookies[provider].orEmpty().ifEmpty { if (provider == "aliyun") driveCookies["ali"].orEmpty() else "" }
                 for (prefKey in keys) {
                 if (value.isEmpty()) edit.remove(prefKey) else edit.putString(prefKey, formatWexPrefValue(prefKey, value))
                 }
@@ -292,7 +292,7 @@ class SpiderHostPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
            val dirs = mutableListOf<File>()
            runCatching { dirs.add(File(ctx.cacheDir, "tvbox-ext/TVBox").apply { mkdirs() }) }
            runCatching { dirs.add(File(Environment.getExternalStorageDirectory(), "TVBox").apply { mkdirs() }) }
-val names = mapOf("quark" to "quark_cookie.txt", "uc" to "uc_cookie.txt", "baidu" to "baidu.txt", "thunder" to "xunlei_cookie.txt", "guangya" to "guangya_token.txt", "115" to "115.txt")
+val names = mapOf("quark" to "quark_cookie.txt", "uc" to "uc_cookie.txt", "baidu" to "baidu.txt", "aliyun" to "aliyun.txt", "thunder" to "xunlei_cookie.txt", "guangya" to "guangya_token.txt", "115" to "115.txt")
             val tokenFiles = mapOf("thunder" to "xunlei.txt", "guangya" to "guangya.txt")
 for (dir in dirs) {
     for ((provider, name) in names) {
@@ -473,6 +473,8 @@ for (dir in dirs) {
                 )
             }
 
+            startProxy()
+
             val cacheKey = instanceKey.ifEmpty { className }
             if (spiders.containsKey(cacheKey)) {
                 lastClassName = cacheKey
@@ -564,7 +566,8 @@ for (dir in dirs) {
                     ) as? String ?: ""
                 }
                 "detailContent" -> {
-                    val ids = (args.getOrNull(0) ?: "").split(",").toMutableList()
+                    val rawId = args.getOrNull(0) ?: ""
+                    val ids = if (args.size > 1) args.toMutableList() else if (rawId.contains("$$$") || rawId.contains("://") || rawId.startsWith("{")) mutableListOf(rawId) else rawId.split(",").toMutableList()
                     clazz.getMethod("detailContent", List::class.java)
                         .invoke(sp, ids) as? String ?: ""
                 }
@@ -637,22 +640,26 @@ for (dir in dirs) {
     // ------------------------------------------------------------------
     // 进程内宿主代理（最小 HTTP server，转发 /proxy）
     // ------------------------------------------------------------------
+    @Synchronized
     private fun startProxy() {
-        if (proxyServer != null) return
+        val existing = proxyServer
+        if (existing != null && !existing.isClosed && proxyPort > 0) return
         try {
-            val server = ServerSocket(0, 0, java.net.InetAddress.getLoopbackAddress())
+            val server = ServerSocket(0, 50, java.net.InetAddress.getLoopbackAddress())
             proxyPort = server.localPort
             proxyServer = server
             proxyExecutor.execute {
-                try {
-                    while (!server.isClosed) {
+                while (!server.isClosed) {
+                    try {
                         val sock = server.accept() ?: break
                         proxyExecutor.execute { handleProxy(sock) }
+                    } catch (_: Throwable) {
+                        if (server.isClosed) break
                     }
-                } catch (_: Throwable) { /* server 关闭 */ }
+                }
             }
         } catch (_: Throwable) {
-            // 绑定失败不致命：只影响加固壳/聚合源的 127.0.0.1 回放地址
+            proxyServer = null
             proxyPort = 0
         }
     }
@@ -702,7 +709,7 @@ while (true) {
         }
     }
 }
-val out = invokeProxy(params)
+val out = if (params["do"] == "ck") ProxyResponse(200, "text/plain; charset=utf-8", "ok".toByteArray(), null, emptyMap()) else invokeProxy(params)
 val hasContentTypeHeader = out.headers.keys.any { it.equals("Content-Type", ignoreCase = true) }
 val hasContentLengthHeader = out.headers.keys.any { it.equals("Content-Length", ignoreCase = true) }
 val hasCorsHeader = out.headers.keys.any { it.equals("Access-Control-Allow-Origin", ignoreCase = true) }

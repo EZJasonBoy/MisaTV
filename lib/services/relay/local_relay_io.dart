@@ -403,7 +403,8 @@ class LocalRelay {
       // 封面 / 海报会在浏览时反复回源，连接池多留一会儿：
       // 默认 15 秒空闲就断开，翻两页再回来又要重做一次 TLS 握手。
       ..idleTimeout = const Duration(seconds: 60)
-      ..autoUncompress = false;
+      ..autoUncompress = false
+      ..findProxy = _findProxyDirectLoopback;
 
     HttpServer server;
     try {
@@ -725,6 +726,10 @@ class LocalRelay {
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
             'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
       }
+    }
+    final m1905Link = targetHost == 'm1905.com' || targetHost.endsWith('.m1905.com');
+    if (m1905Link && _headerValue(headers, HttpHeaders.refererHeader).isEmpty) {
+      headers[HttpHeaders.refererHeader] = 'https://www.1905.com/';
     }
     final davId = (query['dav'] ?? '').trim();
     if (davId.isNotEmpty &&
@@ -2367,7 +2372,8 @@ class LocalRelay {
         client ??
         (_client ??= HttpClient()
           ..connectionTimeout = const Duration(seconds: 15)
-          ..autoUncompress = false);
+          ..autoUncompress = false
+          ..findProxy = _findProxyDirectLoopback);
 
     Future<({HttpClientResponse response, String finalUrl})> send(
       HttpClient targetClient,
@@ -2390,6 +2396,7 @@ class LocalRelay {
       final insecure = _insecureClient ??= HttpClient()
         ..connectionTimeout = const Duration(seconds: 15)
         ..autoUncompress = false
+        ..findProxy = _findProxyDirectLoopback
         ..badCertificateCallback = (_, _, _) => true;
       return await send(insecure);
     }
@@ -2452,6 +2459,12 @@ class LocalRelay {
   /// initialize 超时都没触发过，就是这个原因。
   ///
   /// 取 12 秒：正常 CDN 首字节 < 1s；慢节点偶发 3-5s；超过 12s 基本可以判死。
+  static String _findProxyDirectLoopback(Uri uri) {
+    final h = uri.host.toLowerCase();
+    if (h == '127.0.0.1' || h == 'localhost' || h == '::1') return 'DIRECT';
+    return HttpClient.findProxyFromEnvironment(uri);
+  }
+
   static const _headerTimeout = Duration(seconds: 12);
 
   /// 关闭请求并等响应头；超时/失败都 abort 掉这条连接，避免句柄泄漏。
