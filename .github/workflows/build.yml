@@ -1,18 +1,14 @@
 name: build
 
 on:
-  # main 也纳入：此前只监听 mod，导致合并到 main 的改动完全没有 CI 兜底
-  # （曾有 20 个编译错误的提交差点直接进 main）。
   push:
     branches: [mod, main]
   pull_request:
     branches: [mod, main]
-  # 发 Release 时出正式包并挂到 release 资产上。
   release:
     types: [published]
   workflow_dispatch:
 
-# 需要写权限才能把产物挂到 release 资产（gh release upload）。
 permissions:
   contents: write
 
@@ -43,10 +39,6 @@ jobs:
         run: flutter analyze
 
       - name: 单元测试
-        # 已知偶发：整套测试在 CI 上偶尔被整体中止，受害者随机（表现为某个 test
-        # 文件整批 did not complete、单跑该文件却全过，日志里没有任何超时或异常）。
-        # 已实测：同一 runner、同一提交，单独跑 3 次全过，全量串行也 +984 全过，
-        # 所以这是环境抖动而非用例缺陷，用重试吸收；连试 3 次仍失败即真实失败。
         shell: bash
         run: |
           for attempt in 1 2 3; do
@@ -66,8 +58,6 @@ jobs:
 
   windows:
     name: windows release
-    # 固定在 VS 2022 镜像：windows-latest 已是 VS 2026（MSVC 14.51），
-    # flutter_inappwebview_windows 依赖 <experimental/coroutine>，在 VS 2026 下是硬错误。
     runs-on: windows-2022
     timeout-minutes: 60
     steps:
@@ -84,11 +74,64 @@ jobs:
       - name: Setup NuGet
         uses: nuget/setup-nuget@v2
 
-      - name: Verify NuGet
+      - name: 预安装 flutter_inappwebview_windows 原生依赖
         shell: pwsh
         run: |
-          where.exe nuget
-          nuget help | Select-Object -First 2
+          $pkgDir = (Resolve-Path ".").Path + "\build\windows\x64\packages"
+          New-Item -ItemType Directory -Force -Path $pkgDir | Out-Null
+
+          $pubCache = if ($env:PUB_CACHE) { $env:PUB_CACHE } else { Join-Path $env:LOCALAPPDATA "Pub\Cache" }
+          $cmake = Get-ChildItem -Path (Join-Path $pubCache "hosted\pub.dev") -Directory -Filter "flutter_inappwebview_windows-*" -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending |
+            ForEach-Object { Join-Path $_.FullName "windows\CMakeLists.txt" } |
+            Where-Object { Test-Path $_ } |
+            Select-Object -First 1
+
+          $content = ""
+          if ($cmake) {
+            Write-Host "Found CMakeLists.txt: $cmake"
+            $content = Get-Content $cmake -Raw
+            ($content -split "`n" | Select-Object -First 50) -join "`n" | Write-Host
+          }
+
+          $pkgs = @(
+            'Microsoft.Web.WebView2',
+            'Microsoft.Windows.ImplementationLibrary',
+            'nlohmann.json'
+          )
+
+          foreach ($pkg in $pkgs) {
+            $ver = $null
+            if ($content -match ([regex]::Escape($pkg) + '[^\r\n]*?(?:-Version\s+|VERSION\s+)([0-9]+\.[0-9A-Za-z.\-]+)')) {
+              $ver = $Matches[1]
+            }
+            if ($ver) {
+              Write-Host "Installing $pkg $ver (versioned + unversioned) ..."
+              nuget install $pkg -Version $ver -OutputDirectory $pkgDir -Source https://api.nuget.org/v3/index.json
+              nuget install $pkg -Version $ver -ExcludeVersion -OutputDirectory $pkgDir -Source https://api.nuget.org/v3/index.json
+            } else {
+              Write-Host "Installing $pkg (latest, versioned + unversioned) ..."
+              nuget install $pkg -OutputDirectory $pkgDir -Source https://api.nuget.org/v3/index.json
+              nuget install $pkg -ExcludeVersion -OutputDirectory $pkgDir -Source https://api.nuget.org/v3/index.json
+            }
+            if ($LASTEXITCODE -ne 0) { throw "nuget install $pkg failed" }
+          }
+
+          $incDirs = @()
+          $wv2 = Get-ChildItem -Path $pkgDir -Recurse -Filter "WebView2.h" -ErrorAction SilentlyContinue | Select-Object -First 1
+          $wil = Get-ChildItem -Path $pkgDir -Recurse -Filter "com.h" -ErrorAction SilentlyContinue | Where-Object { $_.Directory.Name -eq "wil" } | Select-Object -First 1
+          $json = Get-ChildItem -Path $pkgDir -Recurse -Filter "json.hpp" -ErrorAction SilentlyContinue | Where-Object { $_.Directory.Name -eq "nlohmann" } | Select-Object -First 1
+
+          if ($wv2)  { $incDirs += $wv2.Directory.FullName }
+          if ($wil)  { $incDirs += $wil.Directory.Parent.FullName }
+          if ($json) { $incDirs += $json.Directory.Parent.FullName }
+
+          Write-Host "Injected INCLUDE dirs: $($incDirs -join ';')"
+          if (-not $wv2 -or -not $json) { throw "预安装头文件缺失" }
+
+          $newInclude = ($incDirs -join ';')
+          if ($env:INCLUDE) { $newInclude = "$newInclude;$env:INCLUDE" }
+          "INCLUDE=$newInclude" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: 构建 Windows Release
         run: flutter build windows --release
@@ -98,8 +141,6 @@ jobs:
         run: |
           $src = "build/windows/x64/runner/Release"
           if (-not (Test-Path $src)) { throw "构建产物不存在：$src" }
-          # App-local VC++ runtime: without these a clean Windows install that
-          # has no vc_redist crashes at startup before Flutter creates a window.
           foreach ($dll in @('msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll')) {
             $path = Join-Path $src $dll
             if (-not (Test-Path $path)) { throw "缺少 VC++ 运行库：$path（未装 vc_redist 的用户会闪退）" }
@@ -107,12 +148,10 @@ jobs:
           $stage = Join-Path $env:RUNNER_TEMP "misatv-win"
           Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          # 显式排除 userdata：本地跑过会生成订阅 / 历史 / 登录态，绝不能进发布包。
           Copy-Item -Path (Join-Path $src '*') -Destination $stage -Recurse -Force -Exclude 'userdata'
           $zip = "MisaTV-windows-x64.zip"
           if (Test-Path $zip) { Remove-Item $zip -Force }
           Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -CompressionLevel Optimal
-          # 断言：包里不能出现 userdata，防止排除逻辑失效后静默上线。
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           $a = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $zip).Path)
           $bad = @($a.Entries | Where-Object { $_.FullName -like 'userdata*' })
