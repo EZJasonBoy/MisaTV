@@ -37,7 +37,7 @@ class JarSpiderAndroidService extends JarSpiderService {
     super.http,
   });
 
-  static const _channel = MethodChannel('com.kniephos.kniephos/spider'');
+  static const _channel = MethodChannel('com.kniephos.kniephos/spider');
     List<String> _lastInvokeDebug = const [];
 
   /// 已加载到插件侧的蜘蛛（按 jar 指纹 + 类名 复用，避免重复加载）。
@@ -465,7 +465,7 @@ class JarSpiderAndroidService extends JarSpiderService {
     AppLog.i('jar', 'playerContent flag=$flag urlEmpty=${result.url.isEmpty} scheme=${u?.scheme ?? ''} host=${u?.host ?? ''} port=${u?.port ?? 0} path=${u?.path ?? ''} msg=${result.message ?? ''}');
     if ((result.url.isEmpty || (result.url.contains(':5266') && (u?.queryParameters['url'] ?? '').isEmpty)) && _lastInvokeDebug.isNotEmpty) {
       for (final line in _lastInvokeDebug) { AppLog.i('jar', 'spiderDebug $line'); } }
-        eturn result;
+        return result;
   }
 
   /// 豆瓣一类源偶发返回空 body（源站 15s 超时 / 限流），加固壳会直接
