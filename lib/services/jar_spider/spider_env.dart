@@ -184,12 +184,15 @@ return jsonEncode({
     final deviceId = pick('deviceId', 'device_id');
     final deviceSign = pick('deviceSign', 'device_sign');
     final peerId = pick('peerId', 'peer_id');
+   final resp = (m?['token_resp'] is Map) ? (m!['token_resp'] as Map).map((k, v) => MapEntry('$k', v)) : m;
+   String pickResp(String a, String b, [String fallback = '']) { final v = '${resp?[a] ?? resp?[b] ?? ''}'.trim(); return v.isNotEmpty ? v : fallback; }
+   final accessToken = resp == null ? '' : pickResp('accessToken', 'access_token'); final rawUserId = pickResp('userId', 'user_id'); final userId = rawUserId.isNotEmpty ? rawUserId : pickResp('sub', 'sub'); int expireTime = 0; final rawExpire = num.tryParse('${resp?['expireTime'] ?? resp?['expires_end'] ?? 0}')?.toInt() ?? 0; if (rawExpire > 0) { expireTime = rawExpire < 1000000000000 ? rawExpire * 1000 : rawExpire; } else { final expiresIn = num.tryParse('${resp?['expires_in'] ?? 0}')?.toInt() ?? 0; if (expiresIn > 0) expireTime = DateTime.now().millisecondsSinceEpoch + expiresIn * 1000; } if (expireTime <= 0 && accessToken.isNotEmpty) expireTime = DateTime.now().millisecondsSinceEpoch + 7200 * 1000;
     return jsonEncode({
-      'accessToken': m == null ? '' : pick('accessToken', 'access_token'),
-      'refreshToken': m == null ? trimmed : pick('refreshToken', 'refresh_token'),
-      'tokenType': pick('tokenType', 'token_type', 'Bearer'),
-      'userId': pick('userId', 'user_id'),
-      'expireTime': 0,
+      'accessToken': accessToken,
+      'refreshToken': resp == null ? trimmed : pickResp('refreshToken', 'refresh_token'),
+      'tokenType': pickResp('tokenType', 'token_type', 'Bearer'),
+      'userId': userId,
+      'expireTime': expireTime,
       'authVersion': 'downloadprovider-25.0.6.30',
       'authPackage': 'com.xunlei.downloadprovider',
       'authClientId': 'Xp6vsxz_7IYVw2BB',
