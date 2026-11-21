@@ -457,6 +457,9 @@ class JarSpiderAndroidService extends JarSpiderService {
         message: result.message,
       );
     }
+
+    final u = Uri.tryParse(result.url);
+    AppLog.i('jar', 'playerContent flag=$flag urlEmpty=${result.url.isEmpty} scheme=${u?.scheme ?? ''} host=${u?.host ?? ''} port=${u?.port ?? 0} path=${u?.path ?? ''} msg=${result.message ?? ''}');
     return result;
   }
 
