@@ -104,7 +104,7 @@ class SpiderEnv {
     // 各通道互相隔离：某一个文件被 JVM 占用时，不能让其余通道也不写。
     await _guard(() => _syncWexFiles(spiderCacheDir, normalized));
     await _guard(() => _syncWexSeed(spiderCacheDir, normalized, extra));
-    await _guard(() => _syncPizazzFiles(tmpDir ?? Directory.systemTemp.path, normalized));
+    await _guard(() => _syncPizazzFiles(tmpDir ?? Directory.systemTemp.path, normalized, extra));
     if (dataDir != null && dataDir.trim().isNotEmpty) {
       await _guard(() => _syncSiteCookieFiles(dataDir, normalized));
       await _guard(() => _syncCloudDrive(dataDir, normalized, ext));
@@ -225,7 +225,7 @@ return jsonEncode({
   }
 
   /// 通道 3：`<java.io.tmpdir>/tvbox-ext/TVBox/*.txt`（JSON 对象，键 `cookie`）。
-  static Future<void> _syncPizazzFiles(String tmpDir, Map<String, String> cookies) async {
+  static Future<void> _syncPizazzFiles(String tmpDir, Map<String, String> cookies, Map<String, String> seed) async {
     final dir = Directory(p.join(tmpDir, 'tvbox-ext', 'TVBox'));
     for (final entry in _pizazzFiles.entries) {
       final file = File(p.join(dir.path, entry.value));
@@ -259,6 +259,7 @@ return jsonEncode({
         body['nickname'] = nickname;
         body['member_type'] = memberType;
       }
+    if (entry.key == 'baidu' && (seed['baidu_user_id'] ?? '').isNotEmpty) userId = seed['baidu_user_id']!;
       if (userId.isNotEmpty) body['userId'] = userId;
       if (username.isNotEmpty) body['username'] = username;
       dir.createSync(recursive: true);
