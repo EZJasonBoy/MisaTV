@@ -432,8 +432,8 @@ class JarSpiderAndroidService extends JarSpiderService {
       if (provider != null) {
         await refreshDriveSession?.call(provider);
         await resetDriveState();
-        loaded = await _ensureLoaded(site);
         await _syncCreds(site);
+        loaded = await _ensureLoaded(site);
         final retried = await _invoke(site, 'playerContent', [
           flag,
           id,
@@ -447,7 +447,7 @@ class JarSpiderAndroidService extends JarSpiderService {
     }
 
     if (result.url.isNotEmpty && result.url.contains('127.0.0.1')) {
-      final url = _rewriteLocalProxy(result.url, loaded.proxyPort);
+      final url = _rewriteLocalProxy(result.url, loaded.proxyPort); if (url.contains(':5266')) { final target = Uri.tryParse(url)?.queryParameters['url'] ?? ''; final targetUri = Uri.tryParse(target); AppLog.i('jar', '5266 proxy target empty=${target.isEmpty} len=${target.length} scheme=${targetUri?.scheme ?? ''} host=${targetUri?.host ?? ''} path=${targetUri?.path ?? ''}'); }
       result = PlayResult(
         url: url,
         parse: result.parse,
