@@ -596,30 +596,40 @@ class JarSpiderService {
         AppLog.w('drive', 'UC 免转存解链失败：${link.reason}');
       }
     }
-    // 夸克排在自己的分支：fty 系壳会把夸克分享塞进 `{sId,fid,share_fid_token,…}`
-    // 这类集参数里，只有线路名明确是夸克时才解释，避免和 UC 抢同一批 id。
+  // 夸克线路在桌面端优先走蜘蛛的多线程代理（/chunk 或 5266），避免原生单线程
+   // 免转存直链被夸克 CDN 限速到 1~2 MB/s 导致卡顿；标记 _nativeDriveFailed 让
+   // play() 直接复用预热 serve host，蜘蛛取链失败时再由 _resolveNativeQuarkFallback 兜底。 
     final quarkCookie = (tokens['quark'] ?? '').trim();
     if (looksLikeQuarkShare(id, flag: flag)) {
       if (quarkCookie.isEmpty) {
         AppLog.w('drive', '夸克分享播放但未绑定账号，回退 jar：${shorten(id, 80)}');
       } else {
-        final ref = extractQuarkShare(id, flag: flag);
-        final link = await resolveQuarkDirect(
-          id,
-          cookie: quarkCookie,
-          flag: flag,
-          episodeName: ref?.name ?? '',
-        );
-        if (link.ok) {
-          AppLog.i('drive', '夸克免转存直链 ${shorten(link.url, 120)}');
-          return PlayResult(url: link.url, flag: flag, headers: link.headers);
-        }
-        AppLog.w('drive', '夸克免转存解链失败：${link.reason}');
+        AppLog.i('drive', '夸克线路跳过单线程免转存直链，优先走蜘蛛多线程代理');
+      _nativeDriveFailed = true;  
       }
     }
     return null;
   }
-
+  Future<PlayResult?> _resolveNativeQuarkFallback(String flag, String id) async {
+    if (!looksLikeQuarkShare(id, flag: flag)) return null;
+    final tokens = driveTokens?.call();
+    final quarkCookie = (tokens?['quark'] ?? '').trim();
+    if (quarkCookie.isEmpty) return null;
+    final ref = extractQuarkShare(id, flag: flag);
+    final link = await resolveQuarkDirect(
+      id,
+      cookie: quarkCookie,
+      flag: flag,
+      episodeName: ref?.name ?? '',
+      );
+    if (link.ok) {
+      AppLog.i('drive', '蜘蛛未取到夸克地址，回退免转存直链 ${shorten(link.url, 120)}');
+      return PlayResult(url: link.url, flag: flag, headers: link.headers);
+    }
+    AppLog.w('drive', '夸克免转存兜底解链失败：${link.reason}');
+    return null;
+  }
+  
   Future<PlayResult?> play(
     SourceBean site,
     String flag,
@@ -763,6 +773,10 @@ class JarSpiderService {
       if (fallback != null) {
         _servePlaySites.add(site.key);
         return fallback;
+      }
+      if (result.url.isEmpty) {
+        final quarkFallback = await _resolveNativeQuarkFallback(flag, id);
+        if (quarkFallback != null) return quarkFallback;
       }
       return result;
     }
