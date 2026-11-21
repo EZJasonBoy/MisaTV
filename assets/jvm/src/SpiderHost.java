@@ -1056,7 +1056,7 @@ public class SpiderHost {
         "com.github.catvod.spider.Cloud_ucpan",
         "com.github.catvod.spider.Cloud_baidu",
       };
-      String[] fields = {"N", "G4, "N", "N", "N""};
+      String[] fields = {"N", "G4", "N", "N", "N""};
       for (int i = 0; i < owners.length; i++) {
         for (ClassLoader cl : loaders) {
           if (cl == null) continue;
