@@ -3764,6 +3764,8 @@ class AppState extends ChangeNotifier {
       if (token.isNotEmpty) seed['Wex_ucpan_token'] = token;
       if (device.isNotEmpty) seed['Wex_ucpan_device_id'] = device;
     }
+    final baiduUid = (driveAccounts['baidu']?.extra['baiduUid'] ?? '').trim();
+    if (baiduUid.isNotEmpty) seed['baidu_user_id'] = baiduUid;
     return seed;
   }
 
@@ -3828,7 +3830,13 @@ class AppState extends ChangeNotifier {
       if (result.valid != true) return;
       // 确认登录成功：合并新 Cookie、清掉访客标记。
       final extra = {...account.extra}..remove('guest');
-      if (result.changed || wasGuest) {
+      final uidChanged = provider == 'baidu' &&
+          result.userId.isNotEmpty &&
+          account.extra['baiduUid'] != result.userId;
+      if (provider == 'baidu' && result.userId.isNotEmpty) {
+        extra['baiduUid'] = result.userId;
+      }
+      if (result.changed || wasGuest || uidChanged) {
         final next = account.copyWith(
           cookie: result.changed ? result.cookie : account.cookie,
           extra: extra,
