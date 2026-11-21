@@ -80,58 +80,23 @@ jobs:
           $pkgDir = (Resolve-Path ".").Path + "\build\windows\x64\packages"
           New-Item -ItemType Directory -Force -Path $pkgDir | Out-Null
 
-          $pubCache = if ($env:PUB_CACHE) { $env:PUB_CACHE } else { Join-Path $env:LOCALAPPDATA "Pub\Cache" }
-          $cmake = Get-ChildItem -Path (Join-Path $pubCache "hosted\pub.dev") -Directory -Filter "flutter_inappwebview_windows-*" -ErrorAction SilentlyContinue |
-            Sort-Object Name -Descending |
-            ForEach-Object { Join-Path $_.FullName "windows\CMakeLists.txt" } |
-            Where-Object { Test-Path $_ } |
-            Select-Object -First 1
+          nuget install Microsoft.Windows.ImplementationLibrary -Version 1.0.231216.1 -ExcludeVersion -OutputDirectory $pkgDir -Source https://api.nuget.org/v3/index.json
+          if ($LASTEXITCODE -ne 0) { throw "nuget install WIL failed" }
+          nuget install Microsoft.Web.WebView2 -Version 1.0.2792.45 -ExcludeVersion -OutputDirectory $pkgDir -Source https://api.nuget.org/v3/index.json
+          if ($LASTEXITCODE -ne 0) { throw "nuget install WebView2 failed" }
+          nuget install nlohmann.json -Version 3.11.2 -ExcludeVersion -OutputDirectory $pkgDir -Source https://api.nuget.org/v3/index.json
+          if ($LASTEXITCODE -ne 0) { throw "nuget install nlohmann.json failed" }
 
-          $content = ""
-          if ($cmake) {
-            Write-Host "Found CMakeLists.txt: $cmake"
-            $content = Get-Content $cmake -Raw
-            ($content -split "`n" | Select-Object -First 50) -join "`n" | Write-Host
+          $inc1 = "$pkgDir\Microsoft.Web.WebView2\build\native\include"
+          $inc2 = "$pkgDir\Microsoft.Windows.ImplementationLibrary\include"
+          $inc3 = "$pkgDir\nlohmann.json\build\native\include"
+          foreach ($d in @($inc1, $inc2, $inc3)) {
+            if (-not (Test-Path $d)) { throw "头文件目录缺失: $d" }
           }
-
-          $pkgs = @(
-            'Microsoft.Web.WebView2',
-            'Microsoft.Windows.ImplementationLibrary',
-            'nlohmann.json'
-          )
-
-          foreach ($pkg in $pkgs) {
-            $ver = $null
-            if ($content -match ([regex]::Escape($pkg) + '[^\r\n]*?(?:-Version\s+|VERSION\s+)([0-9]+\.[0-9A-Za-z.\-]+)')) {
-              $ver = $Matches[1]
-            }
-            if ($ver) {
-              Write-Host "Installing $pkg $ver (versioned + unversioned) ..."
-              nuget install $pkg -Version $ver -OutputDirectory $pkgDir -Source https://api.nuget.org/v3/index.json
-              nuget install $pkg -Version $ver -ExcludeVersion -OutputDirectory $pkgDir -Source https://api.nuget.org/v3/index.json
-            } else {
-              Write-Host "Installing $pkg (latest, versioned + unversioned) ..."
-              nuget install $pkg -OutputDirectory $pkgDir -Source https://api.nuget.org/v3/index.json
-              nuget install $pkg -ExcludeVersion -OutputDirectory $pkgDir -Source https://api.nuget.org/v3/index.json
-            }
-            if ($LASTEXITCODE -ne 0) { throw "nuget install $pkg failed" }
-          }
-
-          $incDirs = @()
-          $wv2 = Get-ChildItem -Path $pkgDir -Recurse -Filter "WebView2.h" -ErrorAction SilentlyContinue | Select-Object -First 1
-          $wil = Get-ChildItem -Path $pkgDir -Recurse -Filter "com.h" -ErrorAction SilentlyContinue | Where-Object { $_.Directory.Name -eq "wil" } | Select-Object -First 1
-          $json = Get-ChildItem -Path $pkgDir -Recurse -Filter "json.hpp" -ErrorAction SilentlyContinue | Where-Object { $_.Directory.Name -eq "nlohmann" } | Select-Object -First 1
-
-          if ($wv2)  { $incDirs += $wv2.Directory.FullName }
-          if ($wil)  { $incDirs += $wil.Directory.Parent.FullName }
-          if ($json) { $incDirs += $json.Directory.Parent.FullName }
-
-          Write-Host "Injected INCLUDE dirs: $($incDirs -join ';')"
-          if (-not $wv2 -or -not $json) { throw "预安装头文件缺失" }
-
-          $newInclude = ($incDirs -join ';')
-          if ($env:INCLUDE) { $newInclude = "$newInclude;$env:INCLUDE" }
-          "INCLUDE=$newInclude" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $clFlags = "/I`"$inc1`" /I`"$inc2`" /I`"$inc3`""
+          if ($env:CL) { $clFlags = "$env:CL $clFlags" }
+          "CL=$clFlags" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Exported CL=$clFlags"
 
       - name: 构建 Windows Release
         run: flutter build windows --release

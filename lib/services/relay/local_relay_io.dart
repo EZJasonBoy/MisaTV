@@ -1870,13 +1870,16 @@ class LocalRelay {
       AppLog.w('relay', '转发取流 JVM 失败：$e');
       return false;
     }
+    List<int>? bufferedPlainM3u8;
     if (!acceptErrorStatus) {
       final ct = (upstream.headers.value(HttpHeaders.contentTypeHeader) ?? '')
           .toLowerCase();
+      final isPlainText =
+          ct.contains('text/plain') &&
+          !ct.contains('mpegurl') &&
+          !ct.contains('m3u8');
       final isNonMediaText =
-          (ct.contains('text/html') ||
-              ct.contains('application/json') ||
-              ct.contains('text/plain')) &&
+          (ct.contains('text/html') || ct.contains('application/json')) &&
           !ct.contains('mpegurl') &&
           !ct.contains('m3u8');
       if (upstream.statusCode >= 400 ||
@@ -1889,6 +1892,19 @@ class LocalRelay {
         );
         return false;
       }
+      if (isPlainText && request.method != 'HEAD') {
+        final bytes = await _readLimited(upstream);
+        final head = utf8.decode(bytes.take(64).toList(), allowMalformed: true).trimLeft();
+        if (head.startsWith('#EXTM3U')) {
+          bufferedPlainM3u8 = bytes;
+        } else {
+          AppLog.w(
+            'relay',
+            '取流 JVM 返回无效 text/plain 响应（HTTP ${upstream.statusCode}, len=${bytes.length}）',
+          );
+          return false;
+        }
+      }
     }
     res.statusCode = upstream.statusCode;
     _copyHeader(upstream, res, HttpHeaders.contentTypeHeader);
@@ -1897,6 +1913,12 @@ class LocalRelay {
     _copyHeader(upstream, res, HttpHeaders.contentRangeHeader);
     _copyHeader(upstream, res, HttpHeaders.contentEncodingHeader);
     if (request.method == 'HEAD') {
+      await res.close();
+      return true;
+    }
+    if (bufferedPlainM3u8 != null) {
+      res.headers.contentLength = bufferedPlainM3u8.length;
+      res.add(bufferedPlainM3u8);
       await res.close();
       return true;
     }
