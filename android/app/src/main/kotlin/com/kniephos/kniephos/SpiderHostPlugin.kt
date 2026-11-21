@@ -394,28 +394,34 @@ for (dir in dirs) {
                 var deviceId = ""
                 var deviceSign = ""
                 var peerId = ""
+                var expireTime = 0L
                 if (trimmed.startsWith("{")) {
                     try {
                         val obj = JSONObject(trimmed)
-                        accessToken = obj.optString("accessToken").ifEmpty { obj.optString("access_token") }
-                        refreshToken = obj.optString("refreshToken").ifEmpty { obj.optString("refresh_token") }
-                        tokenType = obj.optString("tokenType").ifEmpty { obj.optString("token_type") }.ifEmpty { "Bearer" }
-                        userId = obj.optString("userId").ifEmpty { obj.optString("user_id") }
+                        val resp = obj.optJSONObject("token_resp") ?: obj
+                        accessToken = resp.optString("accessToken").ifEmpty { resp.optString("access_token") }
+                        refreshToken = resp.optString("refreshToken").ifEmpty { resp.optString("refresh_token") }
+                        tokenType = resp.optString("tokenType").ifEmpty { resp.optString("token_type") }.ifEmpty { "Bearer" }
+                        userId = resp.optString("userId").ifEmpty { resp.optString("user_id") }.ifEmpty { resp.optString("sub") }
                         deviceId = obj.optString("deviceId").ifEmpty { obj.optString("device_id") }
                         deviceSign = obj.optString("deviceSign").ifEmpty { obj.optString("device_sign") }
                         peerId = obj.optString("peerId").ifEmpty { obj.optString("peer_id") }
+                       val rawExpire = resp.optLong("expireTime", 0L).let { if (it > 0L) it else resp.optLong("expires_end", 0L) }
+                       if (rawExpire > 0L) { expireTime = if (rawExpire < 1_000_000_000_000L) rawExpire * 1000L else rawExpire }
+                       else { val expiresIn = resp.optLong("expires_in", 0L); if (expiresIn > 0L) expireTime = System.currentTimeMillis() + expiresIn * 1000L }
                     } catch (_: Throwable) {
                         refreshToken = trimmed
                     }
                 } else {
                     refreshToken = trimmed
                 }
+               if (expireTime <= 0L && accessToken.isNotEmpty()) expireTime = System.currentTimeMillis() + 7200_000L
                 JSONObject().apply {
                     put("accessToken", accessToken)
                     put("refreshToken", refreshToken)
                     put("tokenType", tokenType)
                     put("userId", userId)
-                    put("expireTime", 0)
+                    put("expireTime", expireTime)
                     put("authVersion", "downloadprovider-25.0.6.30")
                     put("authPackage", "com.xunlei.downloadprovider")
                     put("authClientId", "Xp6vsxz_7IYVw2BB")
