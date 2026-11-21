@@ -3720,7 +3720,9 @@ class AppState extends ChangeNotifier {
         'tokenType': xl.tokenType.trim().isEmpty ? 'Bearer' : xl.tokenType.trim(),
         'userId': xl.userId.trim(),
         'deviceId': xl.deviceId.trim(),
-      });
+        'expireTime': xl.expiresAt,
+        'peerId': xl.peerId.trim(),
+        });
     }
     // 只记 provider 名，绝不把 Cookie 写进日志；下一份日志可直接判断
     // 「没登录」到底是凭据层没注入，还是壳层没读到。
