@@ -588,7 +588,8 @@ for (dir in dirs) {
                 }
                 "playerContent" -> {
                     val vips = (args.getOrNull(2) ?: "").split(",").map { it.trim() }.filter { it.isNotEmpty() }.toMutableList()
-                    clazz.getMethod("playerContent", String::class.java, String::class.java, List::class.java)
+                            com.github.catvod.crawler.SpiderDebug.clearRecent()
+                                        clazz.getMethod("playerContent", String::class.java, String::class.java, List::class.java)
                         .invoke(sp, args.getOrNull(0) ?: "", args.getOrNull(1) ?: "", vips) as? String ?: ""
                 }
                 "liveContent" -> clazz.getMethod("liveContent", String::class.java)
@@ -606,7 +607,7 @@ for (dir in dirs) {
                 }
                 else -> return errMap("未知方法: $method")
             }
-            mapOf("ok" to true, "data" to data)
+  if (method == "playerContent") mapOf("ok" to true, "data" to data, "debug" to com.github.catvod.crawler.SpiderDebug.drainRecent()) else           mapOf("ok" to true, "data" to data)
         } catch (t: Throwable) {
             mapOf("ok" to false, "error" to errorChain(t))
         } finally {

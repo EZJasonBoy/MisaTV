@@ -34,6 +34,7 @@ class LocalRelay {
   LocalRelay._();
   static final LocalRelay instance = LocalRelay._();
 
+  static const _playTotalSizesMax = 256; final Map<String, int> _playTotalSizes = {};
   static const int preferredPort = 9978;
 
   /// BT 取流分片大小：每片写回播放器前做一次 piece 门控。
@@ -794,8 +795,9 @@ class LocalRelay {
     //
     //   所以网盘线路上没有 Range 时，主动合成首段 `bytes=0-<span-1>`，
     //   让上游回 206 + Content-Range —— 有总长、能 seek、速度也回到正常档。
-    final clamped = _shouldClampRange(provider, target)
-        ? clampRange(range) ?? 'bytes=0-${_firstUpstreamRangeBytes - 1}'
+    final knownTotal = _playTotalSizes[target];
+      final clamped = _shouldClampRange(provider, target)
+        ? clampRange(range, totalLength: knownTotal) ?? 'bytes=0-${(knownTotal != null && knownTotal > 0 && knownTotal < _firstUpstreamRangeBytes ? knownTotal : _firstUpstreamRangeBytes) - 1}'
         : range;
     final changed = clamped != range;
     if (changed) {
@@ -1019,7 +1021,8 @@ class LocalRelay {
     if (slash < 0) return;
     final total = int.tryParse(contentRange.substring(slash + 1).trim()) ?? 0;
     if (total <= 0) return;
-    final m = RegExp(
+    if (_playTotalSizes.length >= _playTotalSizesMax && !_playTotalSizes.containsKey(target)) { _playTotalSizes.remove(_playTotalSizes.keys.first); } _playTotalSizes[target] = total;
+     final m = RegExp(
       r'bytes\s*=\s*(\d+)\s*-',
       caseSensitive: false,
     ).firstMatch(range?.trim() ?? '');
@@ -1085,7 +1088,7 @@ class LocalRelay {
   ///
   /// `start == 0`（首段，含 `bytes=0-` 与 `bytes=0-<大数>`）用更小的跨度，
   /// 让播放器尽早拿到第一批数据去做尾部 seek；其余用 [_maxUpstreamRangeBytes]。
-  static String? clampRange(String? range) {
+  static String? clampRange(String? range, {int? totalLength}) {
     if (range == null || range.trim().isEmpty) return range;
     final m = RegExp(
       r'^bytes\s*=\s*(\d+)\s*-\s*(\d*)$',
@@ -1097,15 +1100,16 @@ class LocalRelay {
     final span = start == 0
         ? _firstUpstreamRangeBytes
         : _maxUpstreamRangeBytes;
-    final endText = m.group(2)!.trim();
+    var maxEnd = start + span - 1; if (totalLength != null && totalLength > 0 && maxEnd >= totalLength) { maxEnd = totalLength - 1; } if (maxEnd < start) return range;
+      final endText = m.group(2)!.trim();
     if (endText.isEmpty) {
       // 开放区间：夹成固定跨度（首段更小）
-      return 'bytes=$start-${start + span - 1}';
+      return 'bytes=$start-$maxEnd';
     }
     final end = int.tryParse(endText);
     if (end == null || end < start) return range;
-    if (end - start + 1 <= span) return range;
-    return 'bytes=$start-${start + span - 1}';
+    if (end <= maxEnd) return range;
+    return 'bytes=$start-$maxEnd';
   }
 
   /// 只把音视频 / 图片 / 二进制当作可缓存内容，避免把 HTML 错误页写进缓存。
