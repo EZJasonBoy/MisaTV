@@ -462,7 +462,7 @@ class JarSpiderAndroidService extends JarSpiderService {
     }
 
     final u = Uri.tryParse(result.url);
-    AppLog.i('jar', 'playerContent flag=$flag urlEmpty=${result.url.isEmpty} scheme=${u?.scheme ?? ''} host=${u?.host ?? ''} port=${u?.port ?? 0} path=${u?.path ?? ''} msg=${result.message ?? ''}');
+    AppLog.i('jar', 'playerContent flag=$flag urlEmpty=${result.url.isEmpty} scheme=${u?.scheme ?? ''} host=${u?.host ?? ''} port=${u?.port ?? 0} path=${u?.path ?? ''} msg=${result.message}');
     if ((result.url.isEmpty || (result.url.contains(':5266') && (u?.queryParameters['url'] ?? '').isEmpty)) && _lastInvokeDebug.isNotEmpty) {
       for (final line in _lastInvokeDebug) { AppLog.i('jar', 'spiderDebug $line'); } }
         return result;
