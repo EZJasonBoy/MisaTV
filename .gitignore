@@ -72,3 +72,6 @@ app.*.map.json
 /assets/aria2/aria2c.exe
 /assets/jvm/shell-real/*.jar
 
+
+# 本地临时脚本 / 探针文件，绝不入库
+.tmp*
