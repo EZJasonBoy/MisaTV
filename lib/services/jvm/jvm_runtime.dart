@@ -5,6 +5,8 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:path/path.dart' as p;
+
+import '../bundled_runtime.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../../core/logging/app_log.dart';
@@ -255,12 +257,22 @@ class JvmRuntime {
     final http = RuntimeFetch.newClient();
     AppLog.i('jvm', '开始安装 JVM 运行时 $version → ${dir.path}');
     try {
+      // 先试随包运行时（<exe>/runtime/*），命中就只是本地复制，不再下载。
+      // 缺失时仍走原来的下载逻辑，保证旧包/第三方打包也能用。
+      _setProgress('解包随包运行时…', 0.03);
+      if (!File(p.join(dir.path, 'jre', 'bin', 'java.exe')).existsSync()) {
+        BundledRuntime.seed('jre', Directory(p.join(dir.path, 'jre')));
+      }
       if (!File(p.join(dir.path, 'jre', 'bin', 'java.exe')).existsSync()) {
         await _installJre(dir, http);
       }
       if (!File(p.join(dir.path, 'd2j', 'dex-tools-v2.4.jar')).existsSync()) {
+        BundledRuntime.seed('d2j', Directory(p.join(dir.path, 'd2j')));
+      }
+      if (!File(p.join(dir.path, 'd2j', 'dex-tools-v2.4.jar')).existsSync()) {
         await _installDexTools(dir, http);
       }
+      BundledRuntime.seed('libs', Directory(p.join(dir.path, 'libs')));
       await _installLibs(dir, http);
       _setProgress('写入兼容层…', 0.98);
       await _writeBundled(dir);

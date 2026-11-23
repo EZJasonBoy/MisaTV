@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
+
+import '../bundled_runtime.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../../core/logging/app_log.dart';
@@ -126,6 +128,8 @@ class ArmBridgeRuntime {
     final http = RuntimeFetch.newClient();
     AppLog.i('arm-bridge', '开始安装加固壳运行时 → ${dir.path}');
     try {
+      // 随包 unidbg（<exe>/runtime/unidbg）优先；下面的循环本来就会跳过已存在的 jar。
+      BundledRuntime.seed('unidbg', dir);
       final bases = await _rankedBases();
       var done = 0;
       for (final rel in _jarPaths) {

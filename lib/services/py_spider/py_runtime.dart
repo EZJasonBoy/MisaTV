@@ -4,6 +4,8 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:path/path.dart' as p;
+
+import '../bundled_runtime.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../../core/logging/app_log.dart';
@@ -206,6 +208,10 @@ class PyRuntime {
     final http = RuntimeFetch.newClient();
     AppLog.i('py', '开始安装 Python 运行时 $version → ${dir.path}');
     try {
+      if (!pythonExe.existsSync()) {
+        // 随包 Python（<exe>/runtime/python）优先，缺失才下载官方 embeddable 包。
+        BundledRuntime.seed('python', dir);
+      }
       if (!pythonExe.existsSync()) {
         await _installEmbed(dir, http);
       }
