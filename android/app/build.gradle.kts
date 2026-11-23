@@ -163,7 +163,8 @@ kotlin {
 
 dependencies {
     // 核心库脱糖运行时（与 compileOptions.isCoreLibraryDesugaringEnabled 配套）。
-    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+    // hook-release.aar 的 AAR 元数据要求 nio flavor 且 >= 2.1.5，普通 flavor 会被拒。
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs_nio:2.1.5")
 
     // TVBus（Go 引擎）启动时按 core.pkg / core.sign 伪造 PackageManager。
     // 适配自 FongMi/TV 的 hook-release.aar（GPL-3.0），仅 5KB。
