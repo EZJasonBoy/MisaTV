@@ -157,7 +157,9 @@ class PythonHostPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     @Synchronized
     private fun ensureRunnerPath(py: Python, dir: String) {
         if (runnerDir == dir) return
+        // Chaquopy 的 PyObject.get 返回可空类型；sys.path 必然存在，取不到说明运行时异常。
         val path = py.getModule("sys").get("path")
+            ?: throw IllegalStateException("无法获取 sys.path")
         // 去重后插到最前：升级 / 重建时旧目录不能继续挡住新 runner。
         while (true) {
             try {

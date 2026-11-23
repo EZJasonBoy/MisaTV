@@ -45,6 +45,9 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        // hook-release.aar 用了 java.time 等新 API，AGP 的 AAR 元数据检查要求
+        // 必须开启核心库脱糖，否则 checkReleaseAarMetadata 直接失败。
+        isCoreLibraryDesugaringEnabled = true
     }
 
     defaultConfig {
@@ -159,6 +162,9 @@ kotlin {
 }
 
 dependencies {
+    // 核心库脱糖运行时（与 compileOptions.isCoreLibraryDesugaringEnabled 配套）。
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+
     // TVBus（Go 引擎）启动时按 core.pkg / core.sign 伪造 PackageManager。
     // 适配自 FongMi/TV 的 hook-release.aar（GPL-3.0），仅 5KB。
     implementation(files("libs/hook-release.aar"))

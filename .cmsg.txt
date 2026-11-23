@@ -1,0 +1,12 @@
+fix(android): 修复 fd48369 引入的两处 Android 构建失败
+
+fd48369 加 Chaquopy / TVBus 后只验证了 Windows 构建，Android 侧一直没编译过，
+本次整合 PR #30 时第一次跑 Android CI 就暴露出来：
+
+1. PythonHostPlugin.kt：`py.getModule("sys").get("path")` 返回可空的 PyObject?，
+   直接调 callAttr 触发 Kotlin 空安全错误（164 / 169 行）。改为取不到就抛异常。
+2. build.gradle.kts：hook-release.aar 的 AAR 元数据要求开启核心库脱糖，
+   否则 :app:checkReleaseAarMetadata 失败。补 compileOptions.isCoreLibraryDesugaring
+   与 coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")。
+
+这两处与 PR #30 无关，是主线自身的回归。
