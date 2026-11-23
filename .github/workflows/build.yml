@@ -10,7 +10,14 @@ on:
   # 发 Release 时出正式包并挂到 release 资产上。
   release:
     types: [published]
+  # 手动触发时可指定 release tag，把产物直接挂到该 release 上
+  # （用于发版后某个平台构建失败、需要单独补产物的场景）。
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: '把产物挂到这个 tag 的 release（留空则只出 Actions artifact）'
+        required: false
+        default: ''
 
 # 需要写权限才能把产物挂到 release 资产（gh release upload）。
 permissions:
@@ -152,13 +159,18 @@ jobs:
           retention-days: 14
 
       - name: 挂到 Release 资产
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || inputs.release_tag != ''
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.release_tag }}
         run: |
-          gh release upload "${{ github.event.release.tag_name }}" \
-            "MisaTV-windows-x64.zip" --clobber
+          TAG=$EVENT_TAG
+          if [ -z "$TAG" ]; then TAG=$INPUT_TAG; fi
+          if [ -z "$TAG" ]; then echo '::error::没有可用的 release tag'; exit 1; fi
+          echo "upload to release: $TAG"
+          gh release upload "$TAG" "MisaTV-windows-x64.zip" --clobber
 
       - name: 失败时打印诊断
         if: failure()
