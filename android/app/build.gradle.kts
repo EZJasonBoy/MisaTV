@@ -2,6 +2,7 @@ import org.gradle.api.GradleException
 
 plugins {
     id("com.android.application")
+    id("kotlin-android")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
     // .py 蜘蛛的 CPython 运行时（3.12，随 APK 内置；Android 禁止执行数据目录里的下载文件）。
@@ -47,7 +48,6 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.kniephos.kniephos"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
@@ -65,6 +65,28 @@ android {
         // flag during build.
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+    }
+
+    // 可选正式签名：四个环境变量齐全且 keystore 存在才启用，否则回退 debug 签名。
+    // 合并自 PR #30；与 build-android.yml 里「Decode Android release keystore」配套。
+    signingConfigs {
+        val keystorePath = System.getenv("ANDROID_KEYSTORE_PATH")
+        val storePasswordEnv = System.getenv("ANDROID_STORE_PASSWORD")
+        val keyAliasEnv = System.getenv("ANDROID_KEY_ALIAS")
+        val keyPasswordEnv = System.getenv("ANDROID_KEY_PASSWORD")
+        if (!keystorePath.isNullOrBlank() &&
+            !storePasswordEnv.isNullOrBlank() &&
+            !keyAliasEnv.isNullOrBlank() &&
+            !keyPasswordEnv.isNullOrBlank() &&
+            file(keystorePath).exists()
+        ) {
+            create("release") {
+                storeFile = file(keystorePath)
+                storePassword = storePasswordEnv
+                keyAlias = keyAliasEnv
+                keyPassword = keyPasswordEnv
+            }
+        }
     }
 
     packaging {
@@ -89,14 +111,8 @@ android {
 
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
-            // Flutter 3.47 的 release 构建会跑 R8。CatVod 宿主类只被外部 jar/壳 dex
-            // 反射引用，不 keep 会被裁掉或混淆成短名，导致加固壳 ClassNotFoundException。
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
             isMinifyEnabled = true
-            // 资源裁剪：移除未被引用的 Android 资源（主要是启动图标等少量资源），
-            // 在不砍 ABI 的前提下略微减小 APK。CatVod/Flutter 资源不受影响。
             isShrinkResources = true
             proguardFiles("proguard-rules.pro")
         }
