@@ -3957,39 +3957,47 @@ class AppState extends ChangeNotifier {
     required String serverId,
     String? remotePath,
   }) async {
-    if (davService.byId(serverId) == null) {
+    final server = davService.byId(serverId);
+    if (server == null) {
       throw AppException('请选择 WebDAV 服务器');
     }
     final path = SyncSettings.normalizeRemotePath(
       remotePath ?? syncSettings.remotePath,
     );
-    var report = const SyncMergeReport();
-    final remoteText = await davService.getText(serverId, path);
-    if (remoteText != null && remoteText.trim().isNotEmpty) {
-      Map<String, dynamic>? decoded;
-      try {
-        final raw = jsonDecode(remoteText);
-        if (raw is Map) decoded = Map<String, dynamic>.from(raw);
-      } catch (_) {
-        decoded = null;
+    // 记下实际请求的服务器与路径，用户反馈「同步失败」时日志能直接定位。
+    AppLog.i('sync', 'WebDAV 同步开始：${server.url} → $path');
+    try {
+      var report = const SyncMergeReport();
+      final remoteText = await davService.getText(serverId, path);
+      if (remoteText != null && remoteText.trim().isNotEmpty) {
+        Map<String, dynamic>? decoded;
+        try {
+          final raw = jsonDecode(remoteText);
+          if (raw is Map) decoded = Map<String, dynamic>.from(raw);
+        } catch (_) {
+          decoded = null;
+        }
+        if (decoded == null) {
+          throw AppException('远端同步文件不是合法 JSON（$path）');
+        }
+        report = await applySyncBundle(SyncBundle.fromJson(decoded));
       }
-      if (decoded == null) {
-        throw AppException('远端同步文件不是合法 JSON（$path）');
-      }
-      report = await applySyncBundle(SyncBundle.fromJson(decoded));
+      final merged = buildSyncBundle();
+      await davService.putText(serverId, path, jsonEncode(merged.toJson()));
+      final now = DateTime.now().millisecondsSinceEpoch;
+      syncSettings = syncSettings.copyWith(
+        davServerId: serverId,
+        remotePath: path,
+        lastSyncAt: now,
+      );
+      await store.saveSyncSettings(syncSettings);
+      notifyListeners();
+      AppLog.i('sync', 'WebDAV 同步完成：$path');
+      return report.copyWith(pushed: true);
+    } catch (e) {
+      AppLog.w('sync', 'WebDAV 同步失败（${server.url} → $path）：$e');
+      rethrow;
     }
-    final merged = buildSyncBundle();
-    await davService.putText(serverId, path, jsonEncode(merged.toJson()));
-    final now = DateTime.now().millisecondsSinceEpoch;
-    syncSettings = syncSettings.copyWith(
-      davServerId: serverId,
-      remotePath: path,
-      lastSyncAt: now,
-    );
-    await store.saveSyncSettings(syncSettings);
-    notifyListeners();
-    AppLog.i('sync', 'WebDAV 同步完成：$path');
-    return report.copyWith(pushed: true);
   }
 
   /// 局域网双向同步：拉取对端 → 合并 → 把合并结果推回对端。

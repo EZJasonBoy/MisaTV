@@ -10,9 +10,14 @@ class MainActivity : FlutterActivity() {
         // Application，插件里再怎么剥 ContextWrapper 都取不到，所以这里从 Activity
         // 直接绑定一次（getApplication() 是框架保证的 Application 实例）。
         SpiderHostPlugin.bindApplication(application)
+        TvBusPlugin.bindApplication(application)
         super.configureFlutterEngine(flutterEngine)
         // 手动注册安卓原生 jar/DEX 蜘蛛运行器（dex2jar + unidbg 的安卓等价实现）。
         // 该插件是本地代码（未走 pub 插件自动注册），故在此显式添加。
         flutterEngine.plugins.add(SpiderHostPlugin())
+        // .py 蜘蛛的 CPython 运行时（Chaquopy，随 APK 内置）。
+        flutterEngine.plugins.add(PythonHostPlugin())
+        // TVBus（Go P2P 直播）宿主：Java 包装随包，Go .so 由直播源按需下载。
+        flutterEngine.plugins.add(TvBusPlugin())
     }
 }

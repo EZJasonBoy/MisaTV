@@ -49,6 +49,9 @@ class LocalRelay {
   int _port = 0;
   String _fileRoot = '';
   Map<String, String> Function() _driveTokens = () => const {};
+
+  /// TVBus Go 引擎的 `/tvbus` 配置内容（直播源的 `core.resp`）。
+  String Function()? tvbusConfig;
   List<dynamic> Function() _rules = () => const [];
   bool Function() _purifyEnabled = () => false;
   String Function(String id) _davAuth = (_) => '';
@@ -641,6 +644,23 @@ class LocalRelay {
       if (path.startsWith('/proxy/')) {
         return await _handleJvmProxyPath(request);
       }
+      // TVBus（Go 引擎）在 core.resp 非空时会来取这份配置；内容由
+      // TvBusService 在启动引擎前设置。没有配置时返回空串（HTTP 200）。
+      if (path == '/tvbus') {
+        final body = tvbusConfig?.call() ?? '';
+        final json =
+            body.trimLeft().startsWith('{') || body.trimLeft().startsWith('[');
+        res.statusCode = 200;
+        res.headers.set(
+          'content-type',
+          json
+              ? 'application/json; charset=utf-8'
+              : 'text/plain; charset=utf-8',
+        );
+        res.add(utf8.encode(body));
+        await res.close();
+        return;
+      }
       if (path == '/') return await _text(res, 200, 'MisaTV local relay');
       return await _text(res, 404, 'not found');
     } catch (e, s) {
@@ -1089,9 +1109,7 @@ class LocalRelay {
     if (m == null) return range;
     final start = int.tryParse(m.group(1)!);
     if (start == null || start < 0) return range;
-    final span = start == 0
-        ? _firstUpstreamRangeBytes
-        : _maxUpstreamRangeBytes;
+    final span = start == 0 ? _firstUpstreamRangeBytes : _maxUpstreamRangeBytes;
     final endText = m.group(2)!.trim();
     if (endText.isEmpty) {
       // 开放区间：夹成固定跨度（首段更小）
@@ -1506,9 +1524,7 @@ class LocalRelay {
       }
     }
 
-    void discard(
-      ({HttpClientResponse response, String finalUrl})? opened,
-    ) {
+    void discard(({HttpClientResponse response, String finalUrl})? opened) {
       if (opened == null) return;
       unawaited(opened.response.drain<void>().catchError((Object _) {}));
     }
@@ -2765,8 +2781,6 @@ class LocalRelay {
     await res.close();
   }
 }
-
-
 
 /// 一条 `/play` 转发会话：记住它的地址与「怎么取消」。
 ///
