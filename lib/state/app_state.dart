@@ -635,7 +635,9 @@ class AppState extends ChangeNotifier {
 
   /// 在当前配置的 rawJson 里改 `lives`，重新解析后落盘。
   ///
-  /// 只有 JSON 订阅能这样改；解析失败或没有 `lives` 数组时返回 false。
+  /// 只有 JSON 订阅能这样改；解析失败或没有 `lives` / `live` 数组时返回 false。
+  /// 两个字段名都要认：有的订阅只写 `live`，[addLivesToProfile] 也是同一套判断，
+  /// 否则会出现「加得进去、却删不掉 / 改不了」的割裂。
   Future<bool> _editRawLives(
     void Function(List<dynamic> rawLives) mutate,
   ) async {
@@ -649,7 +651,10 @@ class AppState extends ChangeNotifier {
     } catch (_) {
       return false;
     }
-    final rawLives = root['lives'];
+    final field = root['lives'] is List
+        ? 'lives'
+        : (root['live'] is List ? 'live' : 'lives');
+    final rawLives = root[field];
     if (rawLives is! List) return false;
 
     mutate(rawLives);
@@ -675,6 +680,7 @@ class AppState extends ChangeNotifier {
             lastRefreshAt: p.lastRefreshAt,
             deletedSiteKeys: p.deletedSiteKeys,
             addedSiteKeys: p.addedSiteKeys,
+            addedLiveKeys: p.addedLiveKeys,
           )
         else
           p,
@@ -870,6 +876,7 @@ class AppState extends ChangeNotifier {
             lastRefreshAt: p.lastRefreshAt,
             deletedSiteKeys: p.deletedSiteKeys,
             addedSiteKeys: p.addedSiteKeys,
+            addedLiveKeys: p.addedLiveKeys,
           ),
         );
       } catch (_) {
@@ -1845,9 +1852,20 @@ class AppState extends ChangeNotifier {
     }
     final deletedKeys = existing?.deletedSiteKeys ?? const <String>[];
     final addedKeys = existing?.addedSiteKeys ?? const <String>[];
+    final addedLiveKeys = existing?.addedLiveKeys ?? const <String>[];
     final merged = mergeAddedSites(rawJson, existing, addedKeys);
     if (merged != rawJson) {
       rawJson = merged;
+      parsed = ConfigParser.parse(
+        rawJson,
+        baseUrl: baseUrl ?? url,
+        jarReady: jarReady,
+      );
+    }
+    // 本地并入的直播线路同样要保活：否则刷新一次就被远端内容冲掉。
+    final mergedLives = mergeAddedLives(rawJson, existing, addedLiveKeys);
+    if (mergedLives != rawJson) {
+      rawJson = mergedLives;
       parsed = ConfigParser.parse(
         rawJson,
         baseUrl: baseUrl ?? url,
@@ -1882,6 +1900,7 @@ class AppState extends ChangeNotifier {
       lastRefreshAt: url.isEmpty ? null : now,
       deletedSiteKeys: deletedKeys,
       addedSiteKeys: addedKeys,
+      addedLiveKeys: addedLiveKeys,
     );
 
     if (existing != null) {
@@ -2012,6 +2031,69 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// 刷新时把用户手动并入的直播线路补回订阅 JSON。
+  ///
+  /// 与 [mergeAddedSites] 同一个用途，作用于 `lives`：本地 TXT / M3U 并入某个
+  /// 线上订阅后，刷新会用远端内容覆盖 rawJson，不带这层保活就会被冲掉。
+  @visibleForTesting
+  static String mergeAddedLives(
+    String rawJson,
+    ConfigProfile? existing,
+    List<String> addedKeys,
+  ) {
+    if (existing == null || addedKeys.isEmpty) return rawJson;
+    try {
+      final decoded = parseJsonLenient(rawJson);
+      if (decoded is! Map) return rawJson;
+      final root = Map<String, dynamic>.from(decoded);
+      final field = root['lives'] is List
+          ? 'lives'
+          : (root['live'] is List ? 'live' : 'lives');
+      final current = root[field];
+      if (current is! List && current != null) return rawJson;
+      final lives = current is List ? current : <dynamic>[];
+
+      final old = parseJsonLenient(existing.rawJson);
+      if (old is! Map) return rawJson;
+      final oldLives = old['lives'] ?? old['live'];
+      if (oldLives is! List) return rawJson;
+
+      // 线路没有 key 字段，用 `name|url` 定位（与 liveKeyOf 一致）。
+      String keyOf(Object? item) {
+        if (item is! Map) return '';
+        final url = (item['url'] ?? item['api'] ?? '').toString();
+        return '${(item['name'] ?? '').toString()}|$url';
+      }
+
+      final localByKey = <String, Map<String, dynamic>>{};
+      for (final item in oldLives) {
+        final key = keyOf(item);
+        if (key == '|' || !addedKeys.contains(key)) continue;
+        localByKey[key] = Map<String, dynamic>.from(item as Map);
+      }
+      if (localByKey.isEmpty) return rawJson;
+
+      var changed = false;
+      for (final entry in localByKey.entries) {
+        final index = lives.indexWhere((item) => keyOf(item) == entry.key);
+        if (index >= 0) {
+          if (jsonEncode(lives[index]) != jsonEncode(entry.value)) {
+            lives[index] = entry.value;
+            changed = true;
+          }
+        } else {
+          lives.add(entry.value);
+          changed = true;
+        }
+      }
+      if (!changed) return rawJson;
+      root[field] = lives;
+      return const JsonEncoder.withIndent('  ').convert(root);
+    } catch (_) {
+      return rawJson;
+    }
+  }
+
   /// 按「已删除源」墓碑过滤订阅 JSON 里的 `sites`。
   static String _pruneDeletedSites(String rawJson, List<String> deletedKeys) {
     if (deletedKeys.isEmpty) return rawJson;
@@ -2119,6 +2201,7 @@ class AppState extends ChangeNotifier {
                   lastRefreshAt: p.lastRefreshAt,
                   deletedSiteKeys: p.deletedSiteKeys,
                   addedSiteKeys: p.addedSiteKeys,
+                  addedLiveKeys: p.addedLiveKeys,
                 )
               : p,
         )
@@ -2205,6 +2288,103 @@ class AppState extends ChangeNotifier {
     final id = activeProfile?.id;
     if (id == null) return Future.value(false);
     return addSitesToProfile(id, entries);
+  }
+
+  /// 把本地导入的直播线路并入指定直播订阅；同 name+url 就地合并。
+  ///
+  /// 与 [addSitesToProfile] 对应：本地 TXT / M3U 以前只能进 `localLives`
+  /// （一条独立线路），现在也可以并入某个已有的直播订阅里当新线路。
+  /// 目标订阅必须能宽松解析成 JSON（纯 M3U / TXT 订阅无法插入）。
+  Future<bool> addLivesToProfile(
+    String profileId,
+    List<Map<String, dynamic>> entries,
+  ) async {
+    if (entries.isEmpty) return false;
+    final profile = _profileById(profileId);
+    if (profile == null) return false;
+    final Map<String, dynamic> root;
+    try {
+      final decoded = parseJsonLenient(profile.rawJson);
+      if (decoded is! Map) return false;
+      root = Map<String, dynamic>.from(decoded);
+    } catch (_) {
+      return false;
+    }
+    // 有的订阅只写 `live` 不写 `lives`，与解析器保持同一套字段名。
+    final field = root['lives'] is List
+        ? 'lives'
+        : (root['live'] is List ? 'live' : 'lives');
+    final rawLives = root[field];
+    if (rawLives is! List && rawLives != null) return false;
+    final lives = rawLives is List ? rawLives : <dynamic>[];
+
+    final keys = <String>{};
+    for (final entry in entries) {
+      final key =
+          '${(entry['name'] ?? '').toString()}|${(entry['url'] ?? entry['api'] ?? '').toString()}';
+      if (key == '|') continue;
+      keys.add(key);
+      final index = lives.indexWhere(
+        (item) =>
+            item is Map &&
+            '${(item['name'] ?? '').toString()}|${(item['url'] ?? item['api'] ?? '').toString()}' ==
+                key,
+      );
+      if (index >= 0) {
+        final old = lives[index];
+        final merged = old is Map
+            ? Map<String, dynamic>.from(old)
+            : <String, dynamic>{};
+        merged.addAll(entry);
+        lives[index] = merged;
+      } else {
+        lives.add(Map<String, dynamic>.from(entry));
+      }
+    }
+    if (keys.isEmpty) return false;
+    root[field] = lives;
+
+    final rawJson = const JsonEncoder.withIndent('  ').convert(root);
+    final parsed = ConfigParser.parse(
+      rawJson,
+      baseUrl: profile.resolveBaseUrl,
+      jarReady: jarReady,
+    );
+    final addedLiveKeys = <String>{...profile.addedLiveKeys, ...keys}.toList();
+    profiles = [
+      for (final p in profiles)
+        if (p.id == profile.id)
+          ConfigProfile(
+            id: p.id,
+            name: p.name,
+            url: p.url,
+            baseUrl: profile.baseUrl,
+            rawJson: rawJson,
+            importedAt: p.importedAt,
+            report: parsed.report,
+            siteCount: p.siteCount,
+            liveCount: parsed.config.lives.length,
+            lastRefreshAt: p.lastRefreshAt,
+            deletedSiteKeys: p.deletedSiteKeys,
+            addedSiteKeys: p.addedSiteKeys,
+            addedLiveKeys: addedLiveKeys,
+          )
+        else
+          p,
+    ];
+    if (profile.id == activeLiveProfileId) {
+      liveConfig = parsed.config;
+      final available = lives;
+      if (available.isEmpty) {
+        activeLiveKey = null;
+      } else if (!available.any((b) => liveKeyOf(b) == activeLiveKey)) {
+        activeLiveKey = liveKeyOf(available.first);
+      }
+      await store.setActiveLiveKey(activeLiveKey);
+    }
+    await _persistProfiles();
+    notifyListeners();
+    return true;
   }
 
   /// 把站点并入指定订阅；同 key 条目就地合并。
@@ -3717,12 +3897,14 @@ class AppState extends ChangeNotifier {
       driveTokens['thunder'] = jsonEncode({
         'accessToken': xl.accessToken.trim(),
         'refreshToken': xl.refreshToken.trim(),
-        'tokenType': xl.tokenType.trim().isEmpty ? 'Bearer' : xl.tokenType.trim(),
+        'tokenType': xl.tokenType.trim().isEmpty
+            ? 'Bearer'
+            : xl.tokenType.trim(),
         'userId': xl.userId.trim(),
         'deviceId': xl.deviceId.trim(),
         'expireTime': xl.expiresAt,
         'peerId': xl.peerId.trim(),
-        });
+      });
     }
     // 只记 provider 名，绝不把 Cookie 写进日志；下一份日志可直接判断
     // 「没登录」到底是凭据层没注入，还是壳层没读到。
@@ -3830,7 +4012,8 @@ class AppState extends ChangeNotifier {
       if (result.valid != true) return;
       // 确认登录成功：合并新 Cookie、清掉访客标记。
       final extra = {...account.extra}..remove('guest');
-      final uidChanged = provider == 'baidu' &&
+      final uidChanged =
+          provider == 'baidu' &&
           result.userId.isNotEmpty &&
           account.extra['baiduUid'] != result.userId;
       if (provider == 'baidu' && result.userId.isNotEmpty) {
@@ -3895,8 +4078,14 @@ class AppState extends ChangeNotifier {
     if (_refreshableProviders.contains(provider)) {
       unawaited(_refreshDriveSession(provider));
     }
-    if (provider == 'thunder' && cookie.trim().isNotEmpty && xunleiCloudService.account.refreshToken.trim() != cookie.trim()) {
-      unawaited(xunleiCloudService.loginWithRefreshToken(cookie.trim()).catchError((_) => xunleiCloudService.account));
+    if (provider == 'thunder' &&
+        cookie.trim().isNotEmpty &&
+        xunleiCloudService.account.refreshToken.trim() != cookie.trim()) {
+      unawaited(
+        xunleiCloudService
+            .loginWithRefreshToken(cookie.trim())
+            .catchError((_) => xunleiCloudService.account),
+      );
     }
   }
 

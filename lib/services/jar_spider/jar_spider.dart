@@ -127,6 +127,7 @@ String driveShareKey(String provider, String id) {
   final t = id.trim();
   return '$provider|${t.length > 96 ? t.substring(0, 96) : t}';
 }
+
 class JarSpiderService {
   JarSpiderService({
     JvmRuntime? runtime,
@@ -518,7 +519,8 @@ class JarSpiderService {
     final tokens = driveTokens?.call() ?? const <String, String>{};
     final baiduCookie = (tokens['baidu'] ?? '').trim();
     if (looksLikeBaiduShare(id)) {
-      final banned = (_nativeDriveMisses['baidu'] ?? 0) >= _nativeDriveMissLimit;
+      final banned =
+          (_nativeDriveMisses['baidu'] ?? 0) >= _nativeDriveMissLimit;
       if (baiduCookie.isEmpty) {
         AppLog.w('drive', '百度分享播放但未绑定账号，回退 jar：${shorten(id, 80)}');
       } else if (banned) {
@@ -559,7 +561,8 @@ class JarSpiderService {
         //   `resolveBaiduDirect` 内部已经把 shareId/uk 两种段序都试过一遍，
         //   仍回 -7 说明这份描述符本身就是对不上（或 seKey 过期到无法自愈），
         //   下一次用同一份描述符打过去只会再得 -7。
-        final systematic = link.reason.contains('errno=-7') ||
+        final systematic =
+            link.reason.contains('errno=-7') ||
             link.reason.contains('errno=105') ||
             link.reason.contains('errno=116') ||
             link.reason.contains('errno=113');
@@ -596,21 +599,25 @@ class JarSpiderService {
         AppLog.w('drive', 'UC 免转存解链失败：${link.reason}');
       }
     }
-  // 夸克线路在桌面端优先走蜘蛛的多线程代理（/chunk 或 5266），避免原生单线程
-   // 免转存直链被夸克 CDN 限速到 1~2 MB/s 导致卡顿；标记 _nativeDriveFailed 让
-   // play() 直接复用预热 serve host，蜘蛛取链失败时再由 _resolveNativeQuarkFallback 兜底。 
+    // 夸克线路在桌面端优先走蜘蛛的多线程代理（/chunk 或 5266），避免原生单线程
+    // 免转存直链被夸克 CDN 限速到 1~2 MB/s 导致卡顿；标记 _nativeDriveFailed 让
+    // play() 直接复用预热 serve host，蜘蛛取链失败时再由 _resolveNativeQuarkFallback 兜底。
     final quarkCookie = (tokens['quark'] ?? '').trim();
     if (looksLikeQuarkShare(id, flag: flag)) {
       if (quarkCookie.isEmpty) {
         AppLog.w('drive', '夸克分享播放但未绑定账号，回退 jar：${shorten(id, 80)}');
       } else {
         AppLog.i('drive', '夸克线路跳过单线程免转存直链，优先走蜘蛛多线程代理');
-      _nativeDriveFailed = true;  
+        _nativeDriveFailed = true;
       }
     }
     return null;
   }
-  Future<PlayResult?> _resolveNativeQuarkFallback(String flag, String id) async {
+
+  Future<PlayResult?> _resolveNativeQuarkFallback(
+    String flag,
+    String id,
+  ) async {
     if (!looksLikeQuarkShare(id, flag: flag)) return null;
     final tokens = driveTokens?.call();
     final quarkCookie = (tokens?['quark'] ?? '').trim();
@@ -621,7 +628,7 @@ class JarSpiderService {
       cookie: quarkCookie,
       flag: flag,
       episodeName: ref?.name ?? '',
-      );
+    );
     if (link.ok) {
       AppLog.i('drive', '蜘蛛未取到夸克地址，回退免转存直链 ${shorten(link.url, 120)}');
       return PlayResult(url: link.url, flag: flag, headers: link.headers);
@@ -629,7 +636,7 @@ class JarSpiderService {
     AppLog.w('drive', '夸克免转存兜底解链失败：${link.reason}');
     return null;
   }
-  
+
   Future<PlayResult?> play(
     SourceBean site,
     String flag,
@@ -742,7 +749,7 @@ class JarSpiderService {
       AppLog.w(
         'jar',
         'DASH 回退未成功，保留原地址（播放器将报不支持） ${site.key} '
-        'flag=$flag url=${redactUrl(result.url)}',
+            'flag=$flag url=${redactUrl(result.url)}',
       );
     }
     final host = _playHost;
@@ -936,13 +943,7 @@ class JarSpiderService {
     await _releasePlayHost();
     AppLog.i('jar', '直链播放失败，改用 serve host 重新取链 ${site.key} flag=$flag');
     // 先复用浏览池里预热的 host（1~3 秒），没有再新起专用 host。
-    final warm = await _playViaServe(
-      site,
-      flag,
-      id,
-      vipFlags,
-      reuseWarm: true,
-    );
+    final warm = await _playViaServe(site, flag, id, vipFlags, reuseWarm: true);
     if (warm != null) return warm;
     return _playViaServe(site, flag, id, vipFlags);
   }
@@ -1011,12 +1012,7 @@ class JarSpiderService {
       ]);
       final result = normalizeSpiderPlay(text, flag);
       if (result.url.isNotEmpty) {
-        return _pinServePlayResult(
-          result,
-          host,
-          hostKey,
-          borrowed: borrowed,
-        );
+        return _pinServePlayResult(result, host, hostKey, borrowed: borrowed);
       }
       AppLog.w(
         'jar',
@@ -1157,8 +1153,16 @@ class JarSpiderService {
     if (flag.contains('百度') || lower.contains('baidu')) return 'baidu';
     if (_looksLikeBiliFlag(flag)) return 'bili';
     if (RegExp(r'(^|[^0-9])115([^0-9]|$)').hasMatch(flag)) return '115';
-    if (flag.contains('迅雷') || lower.contains('xunlei') || lower.contains('thunder')) return 'thunder';
-    if (flag.contains('光鸭') || flag.contains('光雅') || lower.contains('guangya')) return 'guangya';
+    if (flag.contains('迅雷') ||
+        lower.contains('xunlei') ||
+        lower.contains('thunder')) {
+      return 'thunder';
+    }
+    if (flag.contains('光鸭') ||
+        flag.contains('光雅') ||
+        lower.contains('guangya')) {
+      return 'guangya';
+    }
     return null;
   }
 
@@ -1189,7 +1193,8 @@ class JarSpiderService {
   final Set<String> _staleMd5Logged = {};
 
   /// 是否是壳内自带取流服务的本机 `/chunk` 地址。
-  static bool isLocalChunkPlayUrl(String url) {    final uri = Uri.tryParse(url.trim());
+  static bool isLocalChunkPlayUrl(String url) {
+    final uri = Uri.tryParse(url.trim());
     if (uri == null || uri.scheme.toLowerCase() != 'http') return false;
     final host = uri.host.toLowerCase();
     if (host != '127.0.0.1' && host != 'localhost') return false;
@@ -1416,7 +1421,11 @@ class JarSpiderService {
   ///
   /// [borrowed] 为 true 表示这只 host 是从**浏览池借来的预热进程**：
   /// 播放结束时只解除 pin，不杀进程（它还要继续给搜索 / 详情页服务）。
-  void _keepPlayServeHost(JarServeHost host, String key, {bool borrowed = false}) {
+  void _keepPlayServeHost(
+    JarServeHost host,
+    String key, {
+    bool borrowed = false,
+  }) {
     _playServeHost = host;
     _playServeKey = key;
     _playServeBorrowed = borrowed;
@@ -1829,6 +1838,7 @@ class JarSpiderService {
     String url,
     File dest,
     String expectMd5, {
+
     /// 声明的 md5 与源站实际内容不一致时，若文件本身是有效 JAR 仍然采用。
     /// 很多订阅的 md5 是作者打包时的旧值，CDN 每次重打包都会变
     /// （实测同一 URL 多次下载长度相同但 md5 不同），严格校验会导致
@@ -1957,12 +1967,19 @@ class JarSpiderService {
     }
     final tmp = File('${file.path}.part');
     try {
-      final req = await client.getUrl(Uri.parse(url));
+      final targetUri = Uri.parse(url);
+      final req = await client.getUrl(targetUri);
       req.headers.set('User-Agent', 'okhttp/4.12.0');
       req.headers.set('Accept', '*/*');
       // 关掉压缩，才能用 content-length 判断是否下完整。
       req.headers.set('Accept-Encoding', 'identity');
       req.headers.set('Cache-Control', 'no-cache');
+      // WebDAV / 坚果云订阅把账号密码写在地址里，jar 与订阅同源同权限：
+      // `HttpClient` 不会自动把 `Uri.userInfo` 转成请求头，不补这一步会 401。
+      final auth = AppHttp.authHeadersOf(targetUri);
+      if (auth.isNotEmpty) {
+        req.headers.set('Authorization', auth['authorization']!);
+      }
       final res = await req.close().timeout(const Duration(seconds: 30));
       if (res.statusCode != 200) {
         await res.drain<void>();
@@ -2640,14 +2657,12 @@ class JarSpiderService {
       final path = p.join(dir.path, index['*']!);
       if (File(path).existsSync()) {
         final starNames = wanted.isEmpty ? null : await _zipNames(File(path));
-        final hit = wanted.isEmpty || (starNames != null && containsWanted(starNames));
+        final hit =
+            wanted.isEmpty || (starNames != null && containsWanted(starNames));
         if (hit) {
           add(index['*'], starNames);
         } else {
-          AppLog.i(
-            'jar',
-            '跳过默认载荷 ${index['*']}：不含 ${className ?? '目标类'}',
-          );
+          AppLog.i('jar', '跳过默认载荷 ${index['*']}：不含 ${className ?? '目标类'}');
         }
       }
     }
@@ -4246,10 +4261,7 @@ class JarSpiderService {
           const Duration(seconds: 15)) {
         final healthy = await host.ping();
         if (!healthy) {
-          AppLog.w(
-            'jar',
-            '常驻 spider host 健康检查失败，剔除 key=$key pid=${host.pid}',
-          );
+          AppLog.w('jar', '常驻 spider host 健康检查失败，剔除 key=$key pid=${host.pid}');
           pool.remove(host);
           await host.killNow();
           continue;
@@ -4801,4 +4813,3 @@ class _ProcResult {
   final String stderr;
   final bool timedOut;
 }
-
