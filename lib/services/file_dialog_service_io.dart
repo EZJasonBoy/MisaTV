@@ -67,27 +67,27 @@ class FileDialogService {
     required String text,
     XTypeGroup? type,
   }) async {
-     if (Platform.isAndroid) {
-        final safeName = suggestedName.trim().isEmpty
-              ? 'misatv-export.txt'
-          : suggestedName.trim();
-      final tmp = File(
-        '${Directory.systemTemp.path}/misatv_export_${DateTime.now().millisecondsSinceEpoch}_$safeName',
+   if (Platform.isAndroid) {
+      final safeName = suggestedName.trim().isEmpty
+            ? 'misatv-export.txt'
+        : suggestedName.trim();
+    final tmp = File(
+      '${Directory.systemTemp.path}/misatv_export_${DateTime.now().millisecondsSinceEpoch}_$safeName',
+    );
+    await tmp.writeAsString(text);
+    try {
+      final saved = await _exportChannel.invokeMethod<String>(
+        'exportLogFile',
+        {'path': tmp.path, 'name': safeName},
       );
-      await tmp.writeAsString(text);
-      try {
-        final saved = await _exportChannel.invokeMethod<String>(
-          'exportLogFile',
-          {'path': tmp.path, 'name': safeName},
-        );
-        return saved;
-      } finally {
-        if (await tmp.exists()) {
-          await tmp.delete();
-        }
+      return saved;
+    } finally {
+      if (await tmp.exists()) {
+        await tmp.delete();
       }
-     }
-        final location = await getSaveLocation(
+    }
+   }
+      final location = await getSaveLocation(
       suggestedName: suggestedName,
       acceptedTypeGroups: type == null ? const [] : [type],
       confirmButtonText: '保存',
