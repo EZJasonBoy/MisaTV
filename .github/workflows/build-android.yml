@@ -112,8 +112,24 @@ jobs:
             echo "::error::flutter_inappwebview_android 的 build.gradle 未找到，patch 未生效"
             exit 1
           fi
-
+      - name: Decode Android release keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "$ANDROID_KEYSTORE_BASE64" | tr -d '\r\n ' | base64 --decode > "${{ runner.temp }}/release.jks"
+            ls -lh "${{ runner.temp }}/release.jks"
+          else  
+            echo "ANDROID_KEYSTORE_BASE64 not set, falling back to debug signing"
+              fi
+        
       - name: Build release APK
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/release.jks
+          ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      
         run: flutter build apk --release --target-platform android-arm64
 
       # 只发布 arm64 包，但 Gradle 默认会把插件依赖里的 armeabi-v7a / x86_64
