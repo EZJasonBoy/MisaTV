@@ -1,10 +1,13 @@
 import 'dart:io';
 
 import 'package:file_selector/file_selector.dart';
+import 'package:flutter/services.dart';
 
 /// 本地文件/目录选择与保存。桌面端走系统对话框；Web 版在 `*_web.dart` 里统一拒绝。
 class FileDialogService {
   const FileDialogService._();
+
+  static const _exportChannel = MethodChannel('com.kniephos.kniephos/sleep_inhibitor');
 
   static const jsonType = XTypeGroup(
     label: 'JSON / TVBox 订阅',
@@ -64,7 +67,27 @@ class FileDialogService {
     required String text,
     XTypeGroup? type,
   }) async {
-    final location = await getSaveLocation(
+     if (Platform.isAndroid) {
+        final safeName = suggestedName.trim().isEmpty
+              ? 'misatv-export.txt'
+          : suggestedName.trim();
+      final tmp = File(
+        '${Directory.systemTemp.path}/misatv_export_${DateTime.now().millisecondsSinceEpoch}_$safeName',
+      );
+      await tmp.writeAsString(text);
+      try {
+        final saved = await _exportChannel.invokeMethod<String>(
+          'exportLogFile',
+          {'path': tmp.path, 'name': safeName},
+        );
+        return saved;
+      } finally {
+        if (await tmp.exists()) {
+          await tmp.delete();
+        }
+      }
+     }
+        final location = await getSaveLocation(
       suggestedName: suggestedName,
       acceptedTypeGroups: type == null ? const [] : [type],
       confirmButtonText: '保存',
