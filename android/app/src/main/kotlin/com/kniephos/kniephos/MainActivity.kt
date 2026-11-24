@@ -2,7 +2,6 @@ package com.kniephos.kniephos
 
 import android.content.ContentValues
 import android.content.Context
-import android.media.AudioManager
 import android.os.Build
 import android.provider.Settings
 import android.os.Environment
@@ -59,7 +58,7 @@ class MainActivity : FlutterActivity() {
             }
             val values = ContentValues().apply {
                 put(MediaStore.Downloads.DISPLAY_NAME, displayName)
-            put(MediaStore.Downloads.MIME_TYPE, mimeType)
+                put(MediaStore.Downloads.MIME_TYPE, mimeType)
                 put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/MisaTV")
             }
             val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
@@ -143,20 +142,6 @@ class MainActivity : FlutterActivity() {
                             }
                             window.attributes = lp
                         }
-                        result.success(null)
-                    }
-                    "getSystemVolume" -> {
-                        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                        val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
-                        val curVol = am.getStreamVolume(AudioManager.STREAM_MUSIC)
-                        result.success((curVol.toDouble() / maxVol.toDouble()).coerceIn(0.0, 1.0))
-                    }
-                    "setSystemVolume" -> {
-                        val ratio = ((call.arguments as? Number)?.toDouble() ?: 0.5).coerceIn(0.0, 1.0)
-                        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                        val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
-                        val target = Math.round(ratio * maxVol).toInt().coerceIn(0, maxVol)
-                        am.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0)
                         result.success(null)
                     }
                     else -> result.notImplemented()
