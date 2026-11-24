@@ -68,9 +68,15 @@ class MainActivity : FlutterActivity() {
             throw IllegalArgumentException("日志文件不存在：$srcPath")
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val mimeType = when {
+                displayName.endsWith(".json", ignoreCase = true) -> "application/json"
+                displayName.endsWith(".m3u", ignoreCase = true) ||
+                    displayName.endsWith(".m3u8", ignoreCase = true) -> "audio/x-mpegurl"
+                else -> "text/plain"
+            }
             val values = ContentValues().apply {
                 put(MediaStore.Downloads.DISPLAY_NAME, displayName)
-                put(MediaStore.Downloads.MIME_TYPE, "text/plain")
+            put(MediaStore.Downloads.MIME_TYPE, mimeType)
                 put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/MisaTV")
             }
             val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
