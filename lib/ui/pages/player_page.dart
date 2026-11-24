@@ -220,6 +220,19 @@ class _PlayerPageState extends State<PlayerPage>
   /// 沉浸观影下窗口本来就全屏，离开播放器时不能把外层沉浸全屏退掉。
   bool _immersiveMode = false;
   bool _landscapeUiApplied = false;
+  static const MethodChannel _androidDeviceChannel =
+      MethodChannel('com.kniephos.kniephos/sleep_inhibitor');
+  bool _portraitFullscreen = false;
+  bool _manualOrientationLocked = false;
+  String? _verticalDragMode;
+  double _androidBrightness = 0.5;
+  double _androidSystemVolume = 0.5;
+  bool _brightnessOverridden = false;
+  bool _gestureHudVisible = false;
+  IconData _gestureHudIcon = Icons.brightness_6_rounded;
+  String _gestureHudLabel = '';
+  double _gestureHudProgress = 0.0;
+  Timer? _gestureHudTimer;
 
   /// 同一集取链进行中的标记：用于忽略重复点击（`_openSeq` 只负责作废旧结果）。
   int? _loadingIndex;
@@ -391,7 +404,7 @@ class _PlayerPageState extends State<PlayerPage>
   /// 独立窗口里按视频分辨率切竖版；内嵌播放器没有回调，什么都不做。
   void _applyVideoAspect(VideoPlayerController controller) {
     final apply = widget.onVideoAspect;
-    if (apply == null) return;
+    if (apply == null && !_isAndroid) return;
     var size = controller.value.size;
     if (size.width <= 0 || size.height <= 0) {
       // fvp 偶尔不给 VideoPlayerValue 尺寸，退回 libmdk 的 MediaInfo。
@@ -400,7 +413,13 @@ class _PlayerPageState extends State<PlayerPage>
       size = Size(stats.width.toDouble(), stats.height.toDouble());
     }
     if (size.width <= 0 || size.height <= 0) return;
-    unawaited(apply(size.width, size.height));
+    if (apply != null) { unawaited(apply(size.width, size.height)); }
+    if (_isAndroid &&
+        !_manualOrientationLocked &&
+        _app.playerSettings.autoLandscape) {
+      final isPortraitVideo = size.height > size.width * 1.05;
+      unawaited(_applyAndroidOrientation(portrait: isPortraitVideo));
+    }
   }
 
   void _syncAudioTracks(VideoPlayerController controller) {
@@ -495,6 +514,10 @@ class _PlayerPageState extends State<PlayerPage>
         SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky),
       );
       _landscapeUiApplied = true;
+      _portraitFullscreen = false;
+    }
+    if (_isAndroid) {
+      unawaited(_syncAndroidDeviceState());
     }
     BossKeyService.instance.bindPlayer(
       this,
@@ -2084,6 +2107,196 @@ class _PlayerPageState extends State<PlayerPage>
     );
   }
 
+  bool get _isAndroid =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+
+  Future<void> _syncAndroidDeviceState() async {
+    if (!_isAndroid) return;
+    try {
+      final brightness = await _androidDeviceChannel.invokeMethod<double>(
+        'getScreenBrightness',
+      );
+      final volume = await _androidDeviceChannel.invokeMethod<double>(
+        'getSystemVolume',
+      );
+      if (!mounted) return;
+      setState(() {
+        if (brightness != null) {
+          _androidBrightness = brightness.clamp(0.0, 1.0);
+        }
+        if (volume != null) {
+          _androidSystemVolume = volume.clamp(0.0, 1.0);
+        }
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _applyAndroidOrientation({
+    required bool portrait,
+    bool manual = false,
+  }) async {
+    if (!_isAndroid) return;
+    if (manual) {
+      _manualOrientationLocked = true;
+    }
+    if (mounted) {
+      setState(() {
+        _portraitFullscreen = portrait;
+      });
+    } else {
+      _portraitFullscreen = portrait;
+    }
+    _landscapeUiApplied = true;
+    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    await SystemChrome.setPreferredOrientations(
+      portrait
+          ? const [
+              DeviceOrientation.portraitUp,
+              DeviceOrientation.portraitDown,
+            ]
+          : const [
+              DeviceOrientation.landscapeLeft,
+              DeviceOrientation.landscapeRight,
+            ],
+    );
+  }
+
+  void _onVerticalDragStart(DragStartDetails details) {
+    if (!_isAndroid) return;
+    final size = MediaQuery.of(context).size;
+    final dy = details.globalPosition.dy;
+    if (dy < 48 || dy > size.height - 48) {
+      _verticalDragMode = null;
+      return;
+    }
+    _verticalDragMode =
+        details.globalPosition.dx < size.width / 2 ? 'brightness' : 'volume';
+  }
+
+  void _onVerticalDragUpdate(DragUpdateDetails details) {
+    if (!_isAndroid || _verticalDragMode == null) return;
+    final height = MediaQuery.of(context).size.height;
+    if (height <= 0) return;
+    final delta = -details.delta.dy / (height * 0.65);
+    if (_verticalDragMode == 'brightness') {
+      _androidBrightness = (_androidBrightness + delta).clamp(0.0, 1.0);
+      _brightnessOverridden = true;
+      unawaited(
+        _androidDeviceChannel.invokeMethod<void>(
+          'setScreenBrightness',
+          _androidBrightness,
+        ),
+      );
+      _showGestureHud(
+        icon: _androidBrightness < 0.35
+            ? Icons.brightness_low_rounded
+            : (_androidBrightness < 0.7
+                ? Icons.brightness_medium_rounded
+                : Icons.brightness_high_rounded),
+        label: '亮度',
+        progress: _androidBrightness,
+      );
+    } else if (_verticalDragMode == 'volume') {
+      _androidSystemVolume = (_androidSystemVolume + delta).clamp(0.0, 1.0);
+      unawaited(
+        _androidDeviceChannel.invokeMethod<void>(
+          'setSystemVolume',
+          _androidSystemVolume,
+        ),
+      );
+      _showGestureHud(
+        icon: _androidSystemVolume <= 0.001
+            ? Icons.volume_off_rounded
+            : (_androidSystemVolume < 0.5
+                ? Icons.volume_down_rounded
+                : Icons.volume_up_rounded),
+        label: '音量',
+        progress: _androidSystemVolume,
+      );
+    }
+  }
+
+  void _onVerticalDragEnd(DragEndDetails details) => _finishVerticalDrag();
+
+  void _onVerticalDragCancel() => _finishVerticalDrag();
+
+  void _finishVerticalDrag() {
+    _verticalDragMode = null;
+  }
+
+  void _showGestureHud({
+    required IconData icon,
+    required String label,
+    required double progress,
+  }) {
+    _gestureHudTimer?.cancel();
+    if (mounted) {
+      setState(() {
+        _gestureHudVisible = true;
+        _gestureHudIcon = icon;
+        _gestureHudLabel = label;
+        _gestureHudProgress = progress.clamp(0.0, 1.0);
+      });
+    }
+    _gestureHudTimer = Timer(const Duration(milliseconds: 900), () {
+      if (mounted) {
+        setState(() {
+          _gestureHudVisible = false;
+        });
+      }
+    });
+  }
+
+  Widget _androidGestureHud() {
+    if (!_isAndroid || !_gestureHudVisible) {
+      return const SizedBox.shrink();
+    }
+    final pct = (_gestureHudProgress * 100).round();
+    return IgnorePointer(
+      child: Center(
+        child: Container(
+          width: 180,
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.72),
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(_gestureHudIcon, color: Colors.white, size: 22),
+                  const SizedBox(width: 8),
+                  Text(
+                    '$_gestureHudLabel $pct%',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                      fontFeatures: [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(4),
+                child: LinearProgressIndicator(
+                  value: _gestureHudProgress,
+                  minHeight: 5,
+                  backgroundColor: Colors.white.withValues(alpha: 0.24),
+                  valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   IconData get _volumeIcon {
     if (_volume <= 0.001) return Icons.volume_off_rounded;
     if (_volume < 0.5) return Icons.volume_down_rounded;
@@ -2236,6 +2449,12 @@ class _PlayerPageState extends State<PlayerPage>
     // 离开播放器即作废睡眠定时器：它的作用域就是这一集，不该在后台继续倒计时。
     _sleepTimer.dispose();
     _bufferingHintTimer?.cancel();
+    _gestureHudTimer?.cancel();
+    if (_isAndroid && _brightnessOverridden) {
+      unawaited(
+        _androidDeviceChannel.invokeMethod<void>('setScreenBrightness', -1.0),
+      );
+    }
     BossKeyService.instance.unbindPlayer(this);
     // 一起看：房主关掉播放器就散场；观众停止轮询。
     if (_partyBound) {
@@ -2920,6 +3139,10 @@ class _PlayerPageState extends State<PlayerPage>
                 onHorizontalDragUpdate: _isMobile ? _onSeekDragUpdate : null,
                 onHorizontalDragEnd: _isMobile ? _onSeekDragEnd : null,
                 onHorizontalDragCancel: _isMobile ? _onSeekDragCancel : null,
+                  onVerticalDragStart: _isAndroid ? _onVerticalDragStart : null,
+                  onVerticalDragUpdate: _isAndroid ? _onVerticalDragUpdate : null,
+                  onVerticalDragEnd: _isAndroid ? _onVerticalDragEnd : null,
+                  onVerticalDragCancel: _isAndroid ? _onVerticalDragCancel : null,
                 onLongPressStart: (_) => _startHoldRate(),
                 onLongPressEnd: (_) => _endHoldRate(),
                 onLongPressCancel: _endHoldRate,
@@ -3066,6 +3289,7 @@ class _PlayerPageState extends State<PlayerPage>
                       ),
                     ),
                     _seekDragHud(),
+          _androidGestureHud(),
                     if (_detailsVisible && !_mini) _detailsOverlay(context),
                   ],
                 ),
@@ -3558,6 +3782,25 @@ class _PlayerPageState extends State<PlayerPage>
                           ),
                         ),
                       ),
+              if (_isAndroid)
+                IconButton(
+                  tooltip: _portraitFullscreen ? '横屏全屏' : '竖屏全屏',
+                  onPressed: () {
+                    unawaited(
+                      _applyAndroidOrientation(
+                        portrait: !_portraitFullscreen,
+                        manual: true,
+                      ),
+                    );
+                  },
+                  icon: Icon(
+                    _portraitFullscreen
+                        ? Icons.stay_current_landscape_rounded
+                        : Icons.stay_current_portrait_rounded,
+                    color: Colors.white70,
+                    size: 20,
+                  ),
+                ),
                       IconButton(
                         tooltip: '全屏（F / Enter）',
                         onPressed: _toggleFullscreen,
