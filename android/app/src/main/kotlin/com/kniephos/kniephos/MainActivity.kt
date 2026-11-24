@@ -3,6 +3,7 @@ package com.kniephos.kniephos
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
@@ -128,6 +129,47 @@ class MainActivity : FlutterActivity() {
                         } catch (t: Throwable) {
                             result.error("EXPORT_FAILED", t.message ?: t.toString(), null)
                         }
+                    }
+                    "getScreenBrightness" -> {
+                        val current = window.attributes.screenBrightness
+                        val brightness = if (current >= 0f) {
+                            current.toDouble()
+                        } else {
+                            try {
+                                val raw = Settings.System.getInt(contentResolver, Settings.System.SCREEN_BRIGHTNESS, 128)
+                                (raw.coerceIn(0, 255) / 255.0)
+                            } catch (_: Throwable) {
+                                0.5
+                            }
+                        }
+                        result.success(brightness.coerceIn(0.0, 1.0))
+                    }
+                    "setScreenBrightness" -> {
+                        val value = (call.arguments as? Number)?.toFloat() ?: -1f
+                        runOnUiThread {
+                            val lp = window.attributes
+                            lp.screenBrightness = if (value < 0f) {
+                                WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+                            } else {
+                                value.coerceIn(0.0f, 1.0f)
+                            }
+                            window.attributes = lp
+                        }
+                        result.success(null)
+                    }
+                    "getSystemVolume" -> {
+                        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                        val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+                        val curVol = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+                        result.success((curVol.toDouble() / maxVol.toDouble()).coerceIn(0.0, 1.0))
+                    }
+                    "setSystemVolume" -> {
+                        val ratio = ((call.arguments as? Number)?.toDouble() ?: 0.5).coerceIn(0.0, 1.0)
+                        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                        val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+                        val target = Math.round(ratio * maxVol).toInt().coerceIn(0, maxVol)
+                        am.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0)
+                        result.success(null)
                     }
                     else -> result.notImplemented()
                 }
