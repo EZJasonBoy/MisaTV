@@ -220,6 +220,16 @@ class _PlayerPageState extends State<PlayerPage>
   /// 沉浸观影下窗口本来就全屏，离开播放器时不能把外层沉浸全屏退掉。
   bool _immersiveMode = false;
   bool _landscapeUiApplied = false;
+  static const MethodChannel _androidDeviceChannel = MethodChannel(
+    'com.kniephos.kniephos/sleep_inhibitor',
+  );
+  bool _portraitFullscreen = false;
+  bool _manualOrientationLocked = false;
+  String? _verticalDragMode;
+  double? _androidBrightness;
+  bool _brightnessOverridden = false;
+  bool _brightnessHudVisible = false;
+  Timer? _brightnessHudTimer;
 
   /// 同一集取链进行中的标记：用于忽略重复点击（`_openSeq` 只负责作废旧结果）。
   int? _loadingIndex;
@@ -391,7 +401,7 @@ class _PlayerPageState extends State<PlayerPage>
   /// 独立窗口里按视频分辨率切竖版；内嵌播放器没有回调，什么都不做。
   void _applyVideoAspect(VideoPlayerController controller) {
     final apply = widget.onVideoAspect;
-    if (apply == null) return;
+    if (apply == null && !_isAndroid) return;
     var size = controller.value.size;
     if (size.width <= 0 || size.height <= 0) {
       // fvp 偶尔不给 VideoPlayerValue 尺寸，退回 libmdk 的 MediaInfo。
@@ -400,7 +410,13 @@ class _PlayerPageState extends State<PlayerPage>
       size = Size(stats.width.toDouble(), stats.height.toDouble());
     }
     if (size.width <= 0 || size.height <= 0) return;
-    unawaited(apply(size.width, size.height));
+    if (apply != null) { unawaited(apply(size.width, size.height)); }
+    if (_isAndroid &&
+        !_manualOrientationLocked &&
+        _app.playerSettings.autoLandscape) {
+      final isPortraitVideo = size.height > size.width * 1.05;
+      unawaited(_applyAndroidOrientation(portrait: isPortraitVideo));
+    }
   }
 
   void _syncAudioTracks(VideoPlayerController controller) {
@@ -495,6 +511,10 @@ class _PlayerPageState extends State<PlayerPage>
         SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky),
       );
       _landscapeUiApplied = true;
+      _portraitFullscreen = false;
+    }
+    if (_isAndroid) {
+      unawaited(_syncAndroidDeviceState());
     }
     BossKeyService.instance.bindPlayer(
       this,
@@ -2084,6 +2104,174 @@ class _PlayerPageState extends State<PlayerPage>
     );
   }
 
+  bool get _isAndroid =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+
+  Future<void> _syncAndroidDeviceState() async {
+    if (!_isAndroid) return;
+    try {
+      final brightness = await _androidDeviceChannel.invokeMethod<num>(
+        'getScreenBrightness',
+      );
+      if (brightness != null && brightness >= 0) {
+        _androidBrightness = brightness.toDouble().clamp(0.01, 1.0);
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _applyAndroidOrientation({
+    required bool portrait,
+    bool manual = false,
+  }) async {
+    if (!_isAndroid) return;
+    if (manual) {
+      _manualOrientationLocked = true;
+    }
+    if (mounted) {
+      setState(() {
+        _portraitFullscreen = portrait;
+      });
+    } else {
+      _portraitFullscreen = portrait;
+    }
+    _landscapeUiApplied = true;
+    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    await SystemChrome.setPreferredOrientations(
+      portrait
+          ? const [
+              DeviceOrientation.portraitUp,
+              DeviceOrientation.portraitDown,
+            ]
+          : const [
+              DeviceOrientation.landscapeLeft,
+              DeviceOrientation.landscapeRight,
+            ],
+    );
+  }
+
+  void _onVerticalDragStart(DragStartDetails details) {
+    if (!_isAndroid) return;
+    final size = MediaQuery.sizeOf(context);
+    final padding = MediaQuery.paddingOf(context);
+    // 有意避开系统栏手势区，避免与系统返回或下拉通知栏冲突。
+    final topGuard = padding.top + 32 > 48 ? padding.top + 32 : 48.0;
+    final bottomGuard = padding.bottom + 32 > 48 ? padding.bottom + 32 : 48.0;
+    final dy = details.globalPosition.dy;
+    if (dy < topGuard || dy > size.height - bottomGuard) {
+      _verticalDragMode = null;
+      return;
+    }
+    _verticalDragMode =
+        details.globalPosition.dx < size.width / 2 ? 'brightness' : 'volume';
+    if (_verticalDragMode == 'brightness' && _androidBrightness == null) {
+      unawaited(_syncAndroidDeviceState());
+    }
+  }
+
+  void _onVerticalDragUpdate(DragUpdateDetails details) {
+    if (!_isAndroid || _verticalDragMode == null) return;
+    final size = MediaQuery.sizeOf(context);
+    final padding = MediaQuery.paddingOf(context);
+    final usableHeight = size.height - padding.top - padding.bottom;
+    if (usableHeight <= 0) return;
+    final delta = -details.delta.dy / (usableHeight * 0.65);
+    if (delta == 0) return;
+    if (_verticalDragMode == 'brightness') {
+      final cur = _androidBrightness;
+      if (cur == null) return;
+      final next = (cur + delta).clamp(0.01, 1.0).toDouble();
+      _androidBrightness = next;
+      _brightnessOverridden = true;
+      unawaited(
+        _androidDeviceChannel.invokeMethod<void>('setScreenBrightness', next),
+      );
+      _flashBrightnessHud();
+    } else if (_verticalDragMode == 'volume') {
+      unawaited(_setVolume(_volume + delta));
+      _flashVolumeHud();
+    }
+  }
+
+  void _onVerticalDragEnd(DragEndDetails details) => _finishVerticalDrag();
+
+  void _onVerticalDragCancel() => _finishVerticalDrag();
+
+  void _finishVerticalDrag() {
+    final mode = _verticalDragMode;
+    _verticalDragMode = null;
+    if (mode == 'volume' && mounted) {
+      unawaited(_setVolume(_volume, persist: true));
+    }
+  }
+
+  void _flashBrightnessHud() {
+    _brightnessHudTimer?.cancel();
+    if (mounted) {
+      setState(() => _brightnessHudVisible = true);
+    }
+    _brightnessHudTimer = Timer(const Duration(milliseconds: 1200), () {
+      if (mounted) setState(() => _brightnessHudVisible = false);
+    });
+  }
+
+  Widget _androidBrightnessHud() {
+    if (!_isAndroid) return const SizedBox.shrink();
+    final value = (_androidBrightness ?? 0.5).clamp(0.0, 1.0);
+    final icon = value < 0.35
+        ? Icons.brightness_low_rounded
+        : (value < 0.7
+              ? Icons.brightness_medium_rounded
+              : Icons.brightness_high_rounded);
+    return Positioned(
+      left: 0,
+      right: 0,
+      bottom: 110,
+      child: Center(
+        child: IgnorePointer(
+          child: AnimatedOpacity(
+            opacity: _brightnessHudVisible ? 1 : 0,
+            duration: const Duration(milliseconds: 160),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.62),
+                borderRadius: BorderRadius.circular(18),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(icon, color: Colors.white, size: 18),
+                  const SizedBox(width: 10),
+                  SizedBox(
+                    width: 132,
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(3),
+                      child: LinearProgressIndicator(
+                        value: value,
+                        minHeight: 4,
+                        backgroundColor: Colors.white24,
+                        valueColor: const AlwaysStoppedAnimation(Colors.white),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Text(
+                    '${(value * 100).round()}%',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   IconData get _volumeIcon {
     if (_volume <= 0.001) return Icons.volume_off_rounded;
     if (_volume < 0.5) return Icons.volume_down_rounded;
@@ -2236,6 +2424,12 @@ class _PlayerPageState extends State<PlayerPage>
     // 离开播放器即作废睡眠定时器：它的作用域就是这一集，不该在后台继续倒计时。
     _sleepTimer.dispose();
     _bufferingHintTimer?.cancel();
+    _brightnessHudTimer?.cancel();
+    if (_isAndroid && _brightnessOverridden) {
+      unawaited(
+        _androidDeviceChannel.invokeMethod<void>('setScreenBrightness', -1.0),
+      );
+    }
     BossKeyService.instance.unbindPlayer(this);
     // 一起看：房主关掉播放器就散场；观众停止轮询。
     if (_partyBound) {
@@ -2920,6 +3114,10 @@ class _PlayerPageState extends State<PlayerPage>
                 onHorizontalDragUpdate: _isMobile ? _onSeekDragUpdate : null,
                 onHorizontalDragEnd: _isMobile ? _onSeekDragEnd : null,
                 onHorizontalDragCancel: _isMobile ? _onSeekDragCancel : null,
+                onVerticalDragStart: _isAndroid ? _onVerticalDragStart : null,
+                onVerticalDragUpdate: _isAndroid ? _onVerticalDragUpdate : null,
+                onVerticalDragEnd: _isAndroid ? _onVerticalDragEnd : null,
+                onVerticalDragCancel: _isAndroid ? _onVerticalDragCancel : null,
                 onLongPressStart: (_) => _startHoldRate(),
                 onLongPressEnd: (_) => _endHoldRate(),
                 onLongPressCancel: _endHoldRate,
@@ -3066,6 +3264,7 @@ class _PlayerPageState extends State<PlayerPage>
                       ),
                     ),
                     _seekDragHud(),
+            _androidBrightnessHud(),
                     if (_detailsVisible && !_mini) _detailsOverlay(context),
                   ],
                 ),
@@ -3558,6 +3757,25 @@ class _PlayerPageState extends State<PlayerPage>
                           ),
                         ),
                       ),
+                if (_isAndroid)
+                  IconButton(
+                    tooltip: _portraitFullscreen ? '横屏全屏' : '竖屏全屏',
+                    onPressed: () {
+                      unawaited(
+                        _applyAndroidOrientation(
+                          portrait: !_portraitFullscreen,
+                          manual: true,
+                        ),
+                      );
+                    },
+                    icon: Icon(
+                      _portraitFullscreen
+                          ? Icons.stay_current_landscape_rounded
+                          : Icons.stay_current_portrait_rounded,
+                      color: Colors.white70,
+                      size: 20,
+                    ),
+                  ),
                       IconButton(
                         tooltip: '全屏（F / Enter）',
                         onPressed: _toggleFullscreen,
